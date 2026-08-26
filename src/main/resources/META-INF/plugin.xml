@@ -1,0 +1,21 @@
+<idea-plugin>
+    <id>io.dsh.jb.deepseek-harness</id>
+    <name>Community DSH Agent</name>
+    <vendor>DeepSeekHarnessForJB community</vendor>
+
+    <description><![CDATA[
+    Community plugin that embeds a DeepSeek Harness (DSH) coding agent in IntelliJ IDEA
+    and Android Studio: a chat tool window, agentic editing with diff preview and apply,
+    plan mode, permission dialogs, and project-wide search/edit/shell capabilities.
+    ]]></description>
+
+    <!-- Platform-only dependency: loads in IntelliJ IDEA AND Android Studio. -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="DSH Community"
+                    anchor="right"
+                    factoryClass="io.dsh.jb.ui.DshToolWindowFactory"
+                    icon="AllIcons.Toolwindows.ToolWindowStructure"/>
+    </extensions>
+</idea-plugin>

@@ -22,6 +22,9 @@ must be answered by the user.
   requirements, plan, validation.
 - Feature specs live in `specs/YYYY-MM-DD-feature-name/` with `requirements.md`,
   `plan.md`, `validation.md`.
+### Commits
+- Never commit unless (a) the user explicitly tells you to, or (b) the validation
+  for the current phase/plan/task/item has passed and the user has been asked.
 ### Spec compliance
 - Never add dependencies outside `specs/tech-stack.md`.
 - Never change behavior without updating the constitution or the feature spec first.

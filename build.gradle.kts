@@ -25,17 +25,21 @@ dependencies {
         zipSigner()
     }
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.3")
+    // Plain JUnit 4, test scope only: our tests are pure JVM and must run as a
+    // normal Gradle test task — not inside the IntelliJ platform test sandbox.
+    testImplementation("junit:junit:4.13.2")
 }
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
+        // The minimum supported IDE (2025.1) runs on JBR 21.
+        jvmTarget.set(JvmTarget.JVM_21)
     }
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 }
 
 intellijPlatform {
@@ -51,5 +55,12 @@ intellijPlatform {
         ides {
             recommended()
         }
+    }
+}
+
+tasks.test {
+    testLogging {
+        events("started", "passed", "failed", "skipped")
+        showStandardStreams = false
     }
 }

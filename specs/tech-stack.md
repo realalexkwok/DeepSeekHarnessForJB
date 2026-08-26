@@ -1,7 +1,9 @@
 # DeepSeekHarnessForJB — Tech Stack
 
 ## Language & toolchain
-- Kotlin (JVM 17 bytecode), Gradle Kotlin DSL, IntelliJ Platform Gradle Plugin 2.x.
+- Kotlin (JVM 21 bytecode — the minimum supported IDE, 2025.1, runs on JBR 21),
+  Gradle Kotlin DSL, IntelliJ Platform Gradle Plugin 2.x; the Kotlin stdlib comes
+  from the platform (no bundled stdlib dependency).
 - Platform plugin: depends only on `com.intellij.modules.platform` so it loads in both
   IntelliJ IDEA and Android Studio; `sinceBuild` 251 (2025.1), `untilBuild` open (adjustable).
 
@@ -38,6 +40,9 @@
 - No dependency on the DSH Web GUI (`localhost:3080`); the plugin renders its own UI.
 
 ## Testing & verification
+- Unit tests with JUnit 4 (test scope only, never packaged in the plugin artifact).
+- Tests are pure JVM and run as a plain Gradle test task — deliberately NOT through
+  the IntelliJ platform test-framework sandbox (slow/headless-hostile for pure-JVM tests).
 - Unit tests for the JSON-RPC codec and event mapping.
 - `buildPlugin` / `runPlugin` smoke runs; DSH-side protocol behavior is already covered
   by the harness repo's e2e suites.

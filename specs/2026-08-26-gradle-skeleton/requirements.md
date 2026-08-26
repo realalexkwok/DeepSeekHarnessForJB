@@ -10,7 +10,8 @@ Spec date: 2026-08-26
 - No runtime bridge, no chat UI, no settings — those are later roadmap items.
 
 ## Decisions (agreed with the user)
-- Language: Kotlin, JVM 17 bytecode.
+- Language: Kotlin, JVM 17 bytecode (raised to JVM 21 during roadmap item 3 — the
+  minimum IDE, 2025.1, runs on JBR 21; see `specs/tech-stack.md`).
 - Build: Gradle Kotlin DSL, IntelliJ Platform Gradle Plugin 2.3.0, Kotlin 2.2.20.
 - Settings script applies `org.jetbrains.intellij.platform.settings` 2.3.0 — required
   for the `intellijPlatform` repositories DSL in `settings.gradle.kts`.

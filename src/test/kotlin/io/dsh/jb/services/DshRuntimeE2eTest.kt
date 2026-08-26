@@ -1,6 +1,14 @@
 package io.dsh.jb.services
 
 import com.sun.net.httpserver.HttpServer
+import io.dsh.jb.events.AssistantChunkEvent
+import io.dsh.jb.events.AssistantMessageEvent
+import io.dsh.jb.events.EventMapper
+import io.dsh.jb.events.MalformedEventData
+import io.dsh.jb.events.StepStartEvent
+import io.dsh.jb.events.TurnEndEvent
+import io.dsh.jb.events.TurnStartEvent
+import io.dsh.jb.events.UserMessageEvent
 import io.dsh.jb.protocol.SessionEventNotification
 import io.dsh.jb.protocol.SessionStatusNotification
 import io.dsh.jb.runtime.DshRuntimeClient
@@ -13,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -94,6 +103,30 @@ class DshRuntimeE2eTest {
                 }
             }
             assertTrue("expected a turn/end event", events.any { it.event.type == "turn/end" })
+
+            // Roadmap item 4: the typed event model must parse the REAL runtime stream.
+            val eventMapper = EventMapper()
+            val views = events.map { eventMapper.parse(it) }
+            assertTrue("expected typed assistant chunks", views.any { it.data is AssistantChunkEvent })
+            assertTrue(
+                "expected a typed assistant message with content",
+                views.any { (it.data as? AssistantMessageEvent)?.message?.content?.isNotEmpty() == true },
+            )
+            assertTrue(
+                "expected typed turn boundaries",
+                views.any { it.data is TurnStartEvent } && views.any { it.data is TurnEndEvent },
+            )
+            assertTrue("expected typed step start", views.any { it.data is StepStartEvent })
+            assertTrue("expected typed user message", views.any { it.data is UserMessageEvent })
+            val malformed = views.filter { it.data is MalformedEventData }
+            assertTrue(
+                "no event payload may fail to bind; errors: " +
+                    malformed.map { (it.data as MalformedEventData).error },
+                malformed.isEmpty(),
+            )
+            val assistantView = views.first { it.data is AssistantMessageEvent }
+            assertNotNull("assistant/message should carry surface metadata", assistantView.surfaceOp)
+
             client.shutdown()
         } catch (t: Throwable) {
             System.err.println("--- DSH runtime stderr (last 40 lines) ---")

@@ -37,7 +37,11 @@
 - Runtime pool: one process per (model, effort) selection; the plugin bundles the
   SDK's agent composition (`agent.cordis.yml`) and generates a per-effort variant
   (`llm-deepseek: { thinking, reasoningEffort }`) handed to each runtime via
-  `DSH_CORDIS_CONFIG` — effort needs no protocol change. Model discovery is the
+  `DSH_CORDIS_CONFIG` — effort needs no protocol change. The generated config is
+  written next to the checkout's own cordis.yml
+  (`<checkout>/examples/jsonrpc-agent/`, node mode) or next to the bundled exe:
+  bare plugin packages resolve through the workspace symlinks under
+  `examples/node_modules`. Model discovery is the
   plugin's own `GET {base}/models` HTTP call with the keychain key (fallback: the
   harness adapter catalog); the chosen id is passed to `initialize.model`.
 - Config: the settings page (Settings → Tools → DeepSeek Harness) holds the runtime

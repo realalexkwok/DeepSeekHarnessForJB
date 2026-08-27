@@ -66,6 +66,13 @@ Spec date: 2026-08-27
 - Tab content is popup menus, not fixed panels (user feedback).
 
 ## Context
+- Cordis placement (fix round 5, 2026-08-27): the generated per-effort cordis is
+  written as `<checkout>/examples/jsonrpc-agent/.dsh-jb-effort-<level>.yml` (node
+  mode) or next to the bundled exe (bundled mode). Verified mechanism: the harness
+  resolves bare plugin packages via the workspace symlinks under
+  `examples/node_modules/@deepseek-ai`, so the config MUST live under `examples/`
+  — next to the checkout's own cordis.yml. A missing canonical directory fails with a
+  clear settings-page error.
 - Wire constraints honored: no effort field and no model-listing method on the SDK
   protocol (verified against `packages/sdk/protocol/src/types.ts` and the sdk
   packages); the cordis-injection and HTTP-discovery designs avoid both.

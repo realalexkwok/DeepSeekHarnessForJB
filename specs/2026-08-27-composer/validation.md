@@ -31,6 +31,20 @@ now open popup menus instead of a fixed panel.
 Fix round 3 (user feedback): the Context-action tab now shows ONLY the selected
 action ("Ask ▾") with the current item checked on every popup open. Re-verified:
 87 tests green, buildPlugin green, artifact rebuilt.
+Fix round 4 (user smoke): the runtime booted but the harness could not load its
+plugin packages — the generated per-effort cordis lived in the system temp dir, and
+bare plugin names resolve by walking up from the config file's directory. The config
+was moved under `<checkout>/.dsh-jb/` — but the user's smoke proved that directory
+wrong too.
+Fix round 5 (user smoke + verified mechanism): the harness resolves bare plugin
+packages via the workspace symlinks under `examples/node_modules/@deepseek-ai`
+(111 links), so the config MUST live under `examples/`. The generated file is now
+written next to the checkout's own cordis.yml as
+`<checkout>/examples/jsonrpc-agent/.dsh-jb-effort-<level>.yml`; a missing canonical
+directory fails with a clear settings-page error. Build stamping added: artifacts and
+the installed plugin version are named `0.1.0.<yyyyMMddHHmm>` (BUILD_NUMBER env
+override). Re-verified: 90 tests green, buildPlugin green, artifact
+DeepSeekHarnessForJB-0.1.0.<stamp>.zip.
 
 1. `./gradlew test` green — 83 tests total: 3 `CordisEffortTest` (all four efforts +
    untouched sections), 5 `PromptAssemblyTest` (ordering/gating/instructions), 5

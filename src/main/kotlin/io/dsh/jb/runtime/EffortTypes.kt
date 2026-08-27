@@ -1,6 +1,6 @@
 package io.dsh.jb.runtime
 
-import java.util.concurrent.TimeUnit
+import java.io.File
 
 /**
  * Reasoning-effort levels exposed in the composer Model tab (roadmap item 10/6/11
@@ -40,6 +40,22 @@ object CordisEffort {
         return base
             .replace(THINKING) { it.groupValues[1] + "thinking: " + thinking }
             .replace(EFFORT) { it.groupValues[1] + "reasoningEffort: " + effort.wire }
+    }
+
+    /**
+     * Directory the generated per-effort cordis must live in (fix round 5,
+     * 2026-08-27): the harness resolves bare plugin packages via the workspace
+     * symlinks under examples/node_modules, so the config must live UNDER
+     * examples/ — next to the checkout's own cordis.yml
+     * (<checkout>/examples/jsonrpc-agent). Bundled mode uses the bundled exe's
+     * directory. Null for a bundled carrier without an exe — such a config never
+     * spawns (validation fails first). Pure — unit-tested headlessly.
+     */
+    fun directoryFor(mode: String, checkoutPath: String, bundledExe: String): File? = when {
+        mode == "bundled" && bundledExe.isNotBlank() ->
+            File(bundledExe).absoluteFile.parentFile
+        mode == "bundled" -> null
+        else -> File(checkoutPath.trim(), "examples/jsonrpc-agent")
     }
 }
 

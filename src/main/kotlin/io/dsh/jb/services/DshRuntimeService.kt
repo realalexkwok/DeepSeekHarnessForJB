@@ -85,15 +85,17 @@ class DshRuntimeService(private val project: Project) : Disposable {
         val nodeExecutable = if (snapshot.mode.ifBlank { "node" } == "node") {
             NodeResolver.resolve()?.path
         } else null
-        val cfg = DshRuntimeConfig.fromSettings(
+        // Validate carrier basics BEFORE generating the cordis file (the file needs
+        // a resolvable location — see CordisEffort.directoryFor).
+        val provisional = DshRuntimeConfig.fromSettings(
             settings = snapshot,
             apiKey = DshApiKey.get(),
             sessionId = sessionIdFor(key),
             cwd = project.basePath ?: System.getProperty("user.dir"),
-            cordisConfig = writeEffortCordis(key.effort),
             nodeExecutable = nodeExecutable,
         )
-        cfg.validateForStart()?.let { throw DshConfigException(it) }
+        provisional.validateForStart()?.let { throw DshConfigException(it) }
+        val cfg = provisional.copy(cordisConfig = writeEffortCordis(key.effort, snapshot))
         val c = DshRuntimeClient(cfg) { line -> logger.warn("[dsh-runtime] $line") }
         eventListeners.forEach(c::addEventListener)
         statusListeners.forEach(c::addStatusListener)
@@ -105,16 +107,28 @@ class DshRuntimeService(private val project: Project) : Disposable {
         return result
     }
 
-    /** Writes the bundled agent composition patched for [effort] and returns its path. */
-    private fun writeEffortCordis(effort: EffortLevel): String {
+    /**
+     * Writes the bundled agent composition patched for [effort] and returns its
+     * path. The file lives under <checkout>/.dsh-jb (node mode) or next to the
+     * bundled exe — NOT in the temp dir: the harness resolves bare plugin packages
+     * by walking up from the config file's directory (fix round 4, 2026-08-27).
+     */
+    private fun writeEffortCordis(effort: EffortLevel, snapshot: io.dsh.jb.settings.DshSettingsSnapshot): String {
         val base = javaClass.getResourceAsStream("/agent.cordis.yml")
             ?.bufferedReader()
             ?.use { it.readText() }
             ?: throw IllegalStateException("bundled agent.cordis.yml resource is missing")
         val patched = CordisEffort.apply(base, effort)
-        val file = File.createTempFile("dsh-cordis-${effort.wire}-", ".yml")
+        val dir = CordisEffort.directoryFor(snapshot.mode, snapshot.checkoutPath, snapshot.bundledExe)
+        if (dir == null || !dir.isDirectory) {
+            throw DshConfigException(
+                "The harness checkout is missing its canonical SDK config directory " +
+                    "(expected <checkout>/examples/jsonrpc-agent)",
+            )
+        }
+        dir.mkdirs()
+        val file = File(dir, "agent-effort-${effort.wire}.yml")
         file.writeText(patched)
-        file.deleteOnExit()
         return file.path
     }
 

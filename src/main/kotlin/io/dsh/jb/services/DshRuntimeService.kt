@@ -10,6 +10,7 @@ import io.dsh.jb.protocol.SessionPromptResult
 import io.dsh.jb.protocol.SessionStatusNotification
 import io.dsh.jb.runtime.DshRuntimeClient
 import io.dsh.jb.runtime.DshRuntimeConfig
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Roadmap item 3: project-scoped owner of the embedded DSH runtime process.
@@ -26,6 +27,11 @@ class DshRuntimeService(private val project: Project) : Disposable {
     @Volatile
     private var started = false
 
+    // Listeners may register before the runtime starts (roadmap item 5: the chat
+    // panel subscribes on construction); they attach when the client is created.
+    private val eventListeners = CopyOnWriteArrayList<(SessionEventNotification) -> Unit>()
+    private val statusListeners = CopyOnWriteArrayList<(SessionStatusNotification) -> Unit>()
+
     fun isRunning(): Boolean = started
 
     fun sessionId(): String = "jb-" + project.locationHash
@@ -37,6 +43,8 @@ class DshRuntimeService(private val project: Project) : Disposable {
             cwd = project.basePath ?: System.getProperty("user.dir"),
         )
         val c = DshRuntimeClient(cfg) { line -> logger.warn("[dsh-runtime] $line") }
+        eventListeners.forEach(c::addEventListener)
+        statusListeners.forEach(c::addStatusListener)
         val result = c.start()
         client = c
         started = true
@@ -44,10 +52,12 @@ class DshRuntimeService(private val project: Project) : Disposable {
     }
 
     fun addEventListener(listener: (SessionEventNotification) -> Unit) {
+        eventListeners += listener
         client?.addEventListener(listener)
     }
 
     fun addStatusListener(listener: (SessionStatusNotification) -> Unit) {
+        statusListeners += listener
         client?.addStatusListener(listener)
     }
 

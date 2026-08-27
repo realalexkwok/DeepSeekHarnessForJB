@@ -1,6 +1,12 @@
 package io.dsh.jb.services
 
 import com.sun.net.httpserver.HttpServer
+import io.dsh.jb.chat.AssistantRow
+import io.dsh.jb.chat.AssistantStatus
+import io.dsh.jb.chat.ChatTranscriptModel
+import io.dsh.jb.chat.NoticeKind
+import io.dsh.jb.chat.NoticeRow
+import io.dsh.jb.chat.UserRow
 import io.dsh.jb.events.AssistantChunkEvent
 import io.dsh.jb.events.AssistantMessageEvent
 import io.dsh.jb.events.EventMapper
@@ -126,6 +132,19 @@ class DshRuntimeE2eTest {
             )
             val assistantView = views.first { it.data is AssistantMessageEvent }
             assertNotNull("assistant/message should carry surface metadata", assistantView.surfaceOp)
+
+            // Roadmap item 5: the transcript model must fold the REAL runtime stream.
+            val transcript = ChatTranscriptModel()
+            events.forEach { transcript.onEvent(it) }
+            statuses.forEach { transcript.onStatus(it) }
+            val ts = transcript.state()
+            assertTrue("expected canonical user row", ts.rows.any { it is UserRow && !it.pending })
+            val assistants = ts.rows.filterIsInstance<AssistantRow>()
+            assertTrue("expected completed assistant row", assistants.isNotEmpty())
+            assertTrue("assistant rows should be done", assistants.all { it.status == AssistantStatus.DONE })
+            assertTrue("assistant text should carry the mock output", assistants.any { it.text.contains("done") })
+            assertTrue("expected turn notices", ts.rows.any { it is NoticeRow && it.kind == NoticeKind.TURN_START })
+            assertTrue("agent should be idle at the end", !ts.running)
 
             client.shutdown()
         } catch (t: Throwable) {

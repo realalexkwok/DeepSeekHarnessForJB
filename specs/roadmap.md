@@ -19,10 +19,19 @@ High-level implementation order, one small phrase of work per item.
 4. Event model: map session.event vocabulary to Kotlin types
 5. Chat tool window: transcript, streaming text, tool cards, thinking disclosure
 6. Context picker: AGENTS.md / current file / rules — all selected by default
+   — subset pulled forward 2026-08-27 (specs/2026-08-27-composer): Current file +
+   AGENTS.md checkboxes in the composer; "workspace rules" remains for this item.
 7. Diff preview/apply: fs tool results rendered as editor diffs with Apply/Reject
 8. Plan mode: exit_plan_mode rendered as an approve/reject review panel
 9. Questions & permissions: ask_user_question answers; command approval dialogs
 10. Settings: API key (optional in checkout mode), base URL, model, runtime path + carrier toggle
+    — pulled forward and implemented 2026-08-27 (specs/2026-08-27-settings) per user
+    approval: the item-3 env-var staging was removed and the key now lives in the OS
+    keychain via PasswordSafe. Includes the proactive first-run ask: missing carrier
+    config opens the settings page automatically.
 11. Context actions: Ask / Explain / Fix on editor selection
+    — composer action tab pulled forward 2026-08-27 (specs/2026-08-27-composer):
+    Ask / Execute / Plan selectable, Fix shown disabled (semantics pending);
+    editor-selection context actions on demand remain for this item.
 12. Packaging: bundle DSH runtime + agent composition; buildPlugin artifact
 13. Verification: unit tests, runPlugin smoke, README

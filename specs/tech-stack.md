@@ -8,8 +8,10 @@
   IntelliJ IDEA and Android Studio; `sinceBuild` 251 (2025.1), `untilBuild` open (adjustable).
 
 ## Plugin side
-- UI: Swing tool window; platform Diff framework for edit previews; Notification API;
-  settings via `projectConfigurable`.
+- UI: Swing tool window with a composer (three bottom tabs — Context / Context
+  action / Model — plus an icon submit); platform Diff framework for edit previews;
+  Notification API; settings via an application-level page (`applicationConfigurable`,
+  Settings → Tools → DeepSeek Harness).
 - Concurrency: kotlinx-coroutines for process IO and event streaming.
 - Serialization: Jackson (jackson-module-kotlin) for the JSON-RPC wire protocol and the
   session-event vocabulary.
@@ -29,12 +31,31 @@
   plan mode, todo, skills, goals, subagents, web, ask-user) and includes
   `agent-instructions`, so the agent reads the workspace `AGENTS.md` (root, plus
   subdirectory files on touch) by default; stdout kept protocol-pure.
-- Config: `DEEPSEEK_API_KEY` (optional in checkout mode when the checkout already carries
-  it), optional `DEEPSEEK_BASE_URL`, model name; sandbox policy scoped to the project
-  workspace.
+- Node.js resolution: GUI-launched IDEs do not inherit the shell PATH, so the plugin
+  resolves node via a candidate list (bare `node`, homebrew/MacPorts/system paths,
+  volta/asdf/nvm/fnm) and spawns the runtime with the resolved absolute path.
+- Runtime pool: one process per (model, effort) selection; the plugin bundles the
+  SDK's agent composition (`agent.cordis.yml`) and generates a per-effort variant
+  (`llm-deepseek: { thinking, reasoningEffort }`) handed to each runtime via
+  `DSH_CORDIS_CONFIG` — effort needs no protocol change. Model discovery is the
+  plugin's own `GET {base}/models` HTTP call with the keychain key (fallback: the
+  harness adapter catalog); the chosen id is passed to `initialize.model`.
+- Config: the settings page (Settings → Tools → DeepSeek Harness) holds the runtime
+  carrier (bundled exe / node checkout with a path picker), the API key stored in the
+  OS keychain via `PasswordSafe` (optional in checkout mode when the checkout already
+  carries it via its own `.env`), an optional `DEEPSEEK_BASE_URL`, and the model
+  name; sandbox policy scoped to the project workspace. The plugin reads NO
+  user-config environment variables (removed 2026-08-27 — env vars were item-3
+  staging only).
 
 ## Inputs the user supplies
-- DeepSeek API key (primary), optional base URL for self-hosted/proxied endpoints, model name.
+- DeepSeek API key (primary, entered in settings and stored in the OS keychain via
+  `PasswordSafe` — never in environment variables or settings files), optional base
+  URL for self-hosted/proxied endpoints, model name (default `deepseek-v4-flash`),
+  and reasoning effort (Off/Low/High/Max, default Max).
+- First-run ask: when the runtime carrier is not configured, the plugin asks the
+  user directly — an in-panel notice plus the DeepSeek Harness settings page opening
+  automatically — instead of failing silently.
 - Context selection per prompt: AGENTS.md, current editor file, and workspace rules —
   all selected by default, each toggleable.
 - No dependency on the DSH Web GUI (`localhost:3080`); the plugin renders its own UI.

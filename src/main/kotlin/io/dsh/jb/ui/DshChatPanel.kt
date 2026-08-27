@@ -1,9 +1,14 @@
 package io.dsh.jb.ui
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
@@ -13,8 +18,11 @@ import com.intellij.util.ui.JBUI
 import io.dsh.jb.chat.AssistantRow
 import io.dsh.jb.chat.AssistantStatus
 import io.dsh.jb.chat.ChatTranscriptModel
+import io.dsh.jb.chat.ComposerAction
 import io.dsh.jb.chat.NoticeKind
 import io.dsh.jb.chat.NoticeRow
+import io.dsh.jb.chat.PromptAssembly
+import io.dsh.jb.chat.PromptContext
 import io.dsh.jb.chat.ToolCardRow
 import io.dsh.jb.chat.ToolCardStatus
 import io.dsh.jb.chat.TranscriptRow
@@ -22,20 +30,36 @@ import io.dsh.jb.chat.TranscriptState
 import io.dsh.jb.chat.UserRow
 import io.dsh.jb.events.TodoItem
 import io.dsh.jb.events.TodoStatus
+import io.dsh.jb.runtime.DshConfigException
+import io.dsh.jb.runtime.EffortLevel
+import io.dsh.jb.runtime.RuntimeKey
 import io.dsh.jb.services.DshRuntimeService
+import io.dsh.jb.settings.DshApiKey
+import io.dsh.jb.settings.DshSettingsConfigurable
+import io.dsh.jb.settings.DshSettingsState
+import io.dsh.jb.settings.ModelCatalog
+import io.dsh.jb.settings.ModelInfo
 import java.awt.BorderLayout
 import java.awt.Dimension
+import java.awt.FlowLayout
 import java.awt.Font
 import java.awt.event.ActionEvent
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.KeyEvent
+import java.io.File
 import javax.swing.AbstractAction
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
+import javax.swing.ButtonGroup
 import javax.swing.JButton
+import javax.swing.JCheckBoxMenuItem
 import javax.swing.JComponent
+import javax.swing.JMenu
+import javax.swing.JMenuItem
 import javax.swing.JPanel
+import javax.swing.JPopupMenu
+import javax.swing.JRadioButtonMenuItem
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
 import kotlinx.coroutines.CoroutineScope
@@ -45,9 +69,12 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
- * Roadmap item 5: the DSH chat transcript. The pure-JVM [ChatTranscriptModel]
- * folds the session-event stream; this panel renders rows on the EDT and owns
- * the composer, the todo panel, the plan-mode badge and the running/idle line.
+ * Roadmap item 5 chat transcript, with the roadmap item 6/10/11 composer pulled
+ * forward (2026-08-27). The composer's bottom strip holds three TAB BUTTONS that
+ * open POPUP MENUS (user feedback 2026-08-27): Context → checkable items Current
+ * file + AGENTS.md; Context action → Ask / Execute / Plan / Fix (pending); Model →
+ * Model + Effort radio submenus + Settings…. The submit icon sits right of the
+ * buttons. Prompts route to the (model, effort)-keyed runtime pool.
  */
 class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
 
@@ -68,16 +95,38 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     }
     private val todoToggle = JButton("Todos (0) ▾")
     private val todoList = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
+
+    private val contextTab = tabButton("Context")
+    private val actionTab = tabButton("Ask ▾")
+    private val modelTab = tabButton("Model")
+    private var currentAction: ComposerAction = ComposerAction.ASK
+    private val contextFileItem = JCheckBoxMenuItem("Current file", true)
+    private val contextAgentsItem = JCheckBoxMenuItem("AGENTS.md", true)
+    private val askItem = JRadioButtonMenuItem("Ask")
+    private val executeItem = JRadioButtonMenuItem("Execute")
+    private val planItem = JRadioButtonMenuItem("Plan")
+    private val fixItem = JRadioButtonMenuItem("Fix (pending)")
+    private val modelSubmenu = JMenu("Model")
+    private val effortMenu = JMenu("Effort")
+    private val customItem = JMenuItem("Custom…")
+    private val settingsItem = JMenuItem("Settings…")
+    private val effortItems = EffortLevel.entries.associateWith { JRadioButtonMenuItem(it.display) }
+    private val sendIcon = JButton(AllIcons.Actions.Execute).apply {
+        toolTipText = "Send prompt"
+        isContentAreaFilled = false
+        isBorderPainted = false
+    }
     private val input = JBTextArea().apply {
         rows = 3
         lineWrap = true
         wrapStyleWord = true
         border = BorderFactory.createEmptyBorder(6, 6, 6, 6)
     }
-    private val sendButton = JButton("Send")
 
     private val rowWidgets = LinkedHashMap<String, RowWidget>()
     private var wasAtBottom = true
+    private var modelIds: List<String> = emptyList()
+    private var populatingModels = false
 
     @Volatile
     private var startedOk = false
@@ -132,12 +181,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             todoWrap.revalidate()
         }
         bottom.add(todoWrap, BorderLayout.NORTH)
-        val composer = JPanel(BorderLayout(8, 0))
-        composer.border = JBUI.Borders.empty(8, 12, 12, 12)
+        val composerBlock = JPanel(BorderLayout())
         val inputScroll = JBScrollPane(input).apply { preferredSize = Dimension(0, 64) }
-        composer.add(inputScroll, BorderLayout.CENTER)
-        composer.add(sendButton, BorderLayout.EAST)
-        bottom.add(composer, BorderLayout.SOUTH)
+        composerBlock.add(inputScroll, BorderLayout.CENTER)
+        val tabRow = JPanel(BorderLayout(8, 0))
+        tabRow.border = JBUI.Borders.empty(4, 12, 6, 12)
+        tabRow.add(buildComposerTabs(), BorderLayout.CENTER)
+        tabRow.add(sendIcon, BorderLayout.EAST)
+        composerBlock.add(tabRow, BorderLayout.SOUTH)
+        bottom.add(composerBlock, BorderLayout.SOUTH)
         add(bottom, BorderLayout.SOUTH)
 
         add(scroll, BorderLayout.CENTER)
@@ -146,7 +198,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         input.actionMap.put("dsh-send", object : AbstractAction() {
             override fun actionPerformed(e: ActionEvent) { send() }
         })
-        sendButton.addActionListener { send() }
+        sendIcon.addActionListener { send() }
         scroll.verticalScrollBar.addAdjustmentListener { trackScroll() }
         rowsPanel.addComponentListener(object : ComponentAdapter() {
             override fun componentResized(e: ComponentEvent) { reflowAll() }
@@ -156,18 +208,151 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val service = DshRuntimeService.getInstance(project)
         service.addEventListener(model::onEvent)
         service.addStatusListener(model::onStatus)
+
+        val s = DshSettingsState.getInstance().snapshot()
+        effortItems[EffortLevel.fromWire(s.effort)]?.isSelected = true
+        populateModels(ModelCatalog.KNOWN)
         scope.launch {
-            try {
-                service.start()
-                startedOk = true
-                ApplicationManager.getApplication().invokeLater { render(model.state()) }
-            } catch (e: Exception) {
-                logger.warn("DSH runtime start failed", e)
+            val catalog = ModelCatalog.fetch(s.baseUrl, DshApiKey.get())
+            ApplicationManager.getApplication().invokeLater { populateModels(catalog) }
+        }
+        scope.launch { startRuntime("") }
+    }
+
+    private fun tabButton(label: String): JButton = JButton(label).apply {
+        isContentAreaFilled = false
+        isBorderPainted = false
+        isFocusPainted = false
+        border = JBUI.Borders.empty(2, 8)
+    }
+
+    /** Three bottom tab buttons, each opening a popup menu on click (user feedback 2026-08-27). */
+    private fun buildComposerTabs(): JComponent {
+        val contextMenu = JPopupMenu()
+        contextMenu.add(contextFileItem)
+        contextMenu.add(contextAgentsItem)
+        contextTab.addActionListener { contextMenu.show(contextTab, 0, contextTab.height) }
+
+        val actionMenu = JPopupMenu()
+        val actionGroup = ButtonGroup()
+        for (item in listOf(askItem, executeItem, planItem, fixItem)) {
+            actionGroup.add(item)
+            actionMenu.add(item)
+        }
+        fixItem.isEnabled = false
+        fixItem.toolTipText = "Pending — semantics vs Execute not settled yet"
+        askItem.addActionListener { actionSelected(ComposerAction.ASK) }
+        executeItem.addActionListener { actionSelected(ComposerAction.EXECUTE) }
+        planItem.addActionListener { actionSelected(ComposerAction.PLAN) }
+        actionTab.addActionListener {
+            // Re-assert the checks from the stored selection on every open, so the
+            // current action is always visibly checked in the popped list.
+            askItem.isSelected = currentAction == ComposerAction.ASK
+            executeItem.isSelected = currentAction == ComposerAction.EXECUTE
+            planItem.isSelected = currentAction == ComposerAction.PLAN
+            actionMenu.show(actionTab, 0, actionTab.height)
+        }
+
+        val modelMenu = JPopupMenu()
+        modelMenu.add(modelSubmenu)
+        modelMenu.add(effortMenu)
+        modelMenu.addSeparator()
+        modelMenu.add(settingsItem)
+        val effortGroup = ButtonGroup()
+        for ((level, item) in effortItems) {
+            effortGroup.add(item)
+            effortMenu.add(item)
+            item.addActionListener { effortSelected(level) }
+        }
+        customItem.addActionListener {
+            ShowSettingsUtil.getInstance().showSettingsDialog(project, DshSettingsConfigurable::class.java)
+        }
+        settingsItem.addActionListener {
+            ShowSettingsUtil.getInstance().showSettingsDialog(project, DshSettingsConfigurable::class.java)
+        }
+        modelTab.addActionListener { modelMenu.show(modelTab, 0, modelTab.height) }
+
+        val strip = JPanel(BorderLayout(8, 0))
+        val buttons = JPanel(FlowLayout(FlowLayout.LEFT, 2, 0))
+        buttons.add(contextTab)
+        buttons.add(actionTab)
+        buttons.add(modelTab)
+        strip.add(buttons, BorderLayout.CENTER)
+        return strip
+    }
+
+    private fun currentModelId(): String =
+        DshSettingsState.getInstance().snapshot().model.trim().ifBlank { ModelCatalog.DEFAULT_MODEL }
+
+    private fun currentKey(): RuntimeKey = RuntimeKey(
+        model = currentModelId(),
+        effort = EffortLevel.fromWire(DshSettingsState.getInstance().snapshot().effort),
+    )
+
+    private fun populateModels(models: List<ModelInfo>) {
+        populatingModels = true
+        try {
+            modelIds = models.map { it.id }.toMutableList()
+            val current = currentModelId()
+            if (current !in modelIds) modelIds = modelIds + current
+            modelSubmenu.removeAll()
+            val group = ButtonGroup()
+            for (id in modelIds) {
+                val item = JRadioButtonMenuItem(ModelCatalog.displayNameFor(id))
+                item.isSelected = id == current
+                item.addActionListener { if (!populatingModels) modelSelected(id) }
+                group.add(item)
+                modelSubmenu.add(item)
+            }
+            modelSubmenu.addSeparator()
+            modelSubmenu.add(customItem)
+        } finally {
+            populatingModels = false
+        }
+    }
+
+    /** Stores the selected action and mirrors it on the tab button label. */
+    private fun actionSelected(action: ComposerAction) {
+        currentAction = action
+        actionTab.text = "${action.display} ▾"
+    }
+
+    private fun modelSelected(id: String) {
+        val s = DshSettingsState.getInstance()
+        if (id == s.model) return
+        s.model = id
+        scope.launch { startRuntime("Model changed to ${ModelCatalog.displayNameFor(id)} — restarting runtime") }
+    }
+
+    private fun effortSelected(level: EffortLevel) {
+        val s = DshSettingsState.getInstance()
+        if (level.wire == s.effort) return
+        s.effort = level.wire
+        scope.launch { startRuntime("Effort changed to ${level.display} — restarting runtime") }
+    }
+
+    private suspend fun startRuntime(noticeText: String) {
+        try {
+            DshRuntimeService.getInstance(project).startFor(currentKey())
+            startedOk = true
+            ApplicationManager.getApplication().invokeLater {
+                if (noticeText.isNotEmpty()) model.notice(noticeText)
+                render(model.state())
+            }
+        } catch (e: Exception) {
+            logger.warn("DSH runtime start failed", e)
+            if (e is DshConfigException) {
+                ApplicationManager.getApplication().invokeLater {
+                    model.notice("${e.message} — configuring DeepSeek Harness")
+                    statusLabel.text = "DSH agent: not configured"
+                    ShowSettingsUtil.getInstance()
+                        .showSettingsDialog(project, DshSettingsConfigurable::class.java)
+                }
+            } else {
                 ApplicationManager.getApplication().invokeLater {
                     model.notice(
                         "Runtime start failed: ${e.message ?: e.javaClass.simpleName} — " +
-                            "set DSH_RUNTIME_MODE=node and DSH_CHECKOUT to a DeepSeek Harness " +
-                            "checkout before starting the IDE (a settings page arrives with roadmap item 10)",
+                            "check Settings → Tools → DeepSeek Harness",
                     )
                     statusLabel.text = "DSH agent: start failed"
                 }
@@ -179,10 +364,11 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val text = input.text.trim()
         if (text.isEmpty()) return
         input.text = ""
-        model.echoPrompt(text)
+        val assembled = PromptAssembly.assemble(text, gatherContext())
+        model.echoPrompt(assembled)
         scope.launch {
             try {
-                DshRuntimeService.getInstance(project).prompt(text)
+                DshRuntimeService.getInstance(project).prompt(assembled)
             } catch (e: Exception) {
                 logger.warn("prompt failed", e)
                 ApplicationManager.getApplication().invokeLater {
@@ -190,6 +376,26 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                 }
             }
         }
+    }
+
+    private fun gatherContext(): PromptContext {
+        val editor: Editor? = FileEditorManager.getInstance(project).selectedTextEditor
+        val file = editor?.let { FileDocumentManager.getInstance().getFile(it.document) }
+        val selection = editor?.selectionModel?.selectedText?.takeIf { it.isNotBlank() }
+        val agentsText = project.basePath
+            ?.let { File(it, "AGENTS.md") }
+            ?.takeIf { it.isFile }
+            ?.let { runCatching { it.readText() }.getOrNull() }
+        val action = currentAction
+        return PromptContext(
+            action = action,
+            includeCurrentFile = contextFileItem.isSelected,
+            includeAgents = contextAgentsItem.isSelected,
+            currentFilePath = file?.path,
+            currentFileContent = editor?.document?.text,
+            selection = selection,
+            agentsContent = agentsText,
+        )
     }
 
     private fun render(state: TranscriptState) {

@@ -17,6 +17,9 @@ Spec date: 2026-08-26
 - Config source for this item: environment variables (`DSH_RUNTIME_MODE`,
   `DSH_RUNTIME_EXE`, `DSH_CHECKOUT`, `DSH_CORDIS_CONFIG`, `DEEPSEEK_API_KEY`,
   `DEEPSEEK_BASE_URL`, `DSH_MODEL`); the settings page (item 10) replaces this later.
+  Superseded 2026-08-27: the settings page (item 10, pulled forward — see
+  `specs/2026-08-27-settings/requirements.md`) replaced the env-var staging, and all
+  user-config env reads were removed from production code.
 - Carriers:
   1. bundled — single-file executable `dsh-jsonrpc-agent-pkg-<platform>-<arch>` from
      `DSH_RUNTIME_EXE` (its `-rg` sidecar must sit beside it; DSH packaging requirement);

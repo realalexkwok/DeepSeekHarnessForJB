@@ -17,5 +17,10 @@
                     anchor="right"
                     factoryClass="io.dsh.jb.ui.DshToolWindowFactory"
                     icon="AllIcons.Toolwindows.ToolWindowStructure"/>
+        <applicationConfigurable
+                parentId="tools"
+                id="io.dsh.jb.settings"
+                displayName="DeepSeek Harness"
+                instance="io.dsh.jb.settings.DshSettingsConfigurable"/>
     </extensions>
 </idea-plugin>

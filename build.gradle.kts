@@ -1,3 +1,5 @@
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -7,7 +9,11 @@ plugins {
 }
 
 group = "io.dsh.jb"
-version = "0.1.0"
+// Build stamp after the version (2026-08-27): every build is uniquely identifiable
+// in the artifact name AND in Settings → Plugins. Override with BUILD_NUMBER env.
+val buildStamp: String = System.getenv("BUILD_NUMBER")?.takeIf { it.isNotBlank() }
+    ?: LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmm"))
+version = "0.1.0.$buildStamp"
 
 repositories {
     mavenCentral()

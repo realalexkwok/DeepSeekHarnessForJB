@@ -10,7 +10,10 @@ Base: `main` after merging roadmap item 4 (merge commit 0596754).
   tool-call↔tool-result cards, turn/step + plan/mode + approval audit rows, a compact
   todo panel, and a minimal composer (input + Send) wired to `DshRuntimeService.prompt`.
 - Explicitly deferred: markdown rendering, diff preview (item 7), interactive
-  approval dialogs (item 9), settings UI (item 10).
+  approval dialogs (item 9). The settings UI was originally deferred to item 10 but
+  was pulled forward on 2026-08-27 (see `specs/2026-08-27-settings`); this panel
+  gets its runtime config through `DshRuntimeService`, which now consults the
+  settings page — no environment variables.
 
 ## Decisions (agreed with the user, 2026-08-26)
 - Model/view split: a pure-JVM `ChatTranscriptModel` folds `SessionEventView`
@@ -37,7 +40,12 @@ Base: `main` after merging roadmap item 4 (merge commit 0596754).
 - Consumes `io.dsh.jb.events` (item 4) and `io.dsh.jb.services.DshRuntimeService`
   (item 3); wire limitations honored (no per-prompt result beyond enqueue, no
   prompt-cancel, no history replay; `session.status` drives the running/idle line).
+- Superseded 2026-08-27: the plain composer was replaced by the tabbed composer
+  (Context / Context action / Model + icon submit) and the runtime pool per (model,
+  effort) — see `specs/2026-08-27-composer`.
 - The runtime starts when the tool window opens (project-scoped service); a start
-  failure shows in the status line and the IDE log instead of blocking the UI.
+  failure shows in the status line and the IDE log instead of blocking the UI. As of
+  2026-08-27 a CONFIGURATION failure additionally opens Settings → Tools → DeepSeek
+  Harness automatically (proactive ask — see `specs/2026-08-27-settings`).
 - UI toolkit: Swing + platform components (JBTextArea/JBLabel/JBScrollPane) per
   tech-stack — no embedded web shell.

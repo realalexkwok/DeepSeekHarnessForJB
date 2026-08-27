@@ -42,5 +42,9 @@ and every write to disk is preceded by an ask-user-question round.
 
 ## Settings
 
-- DeepSeek API key (optional when a configured DSH checkout already carries it via `.env`)
-- Optional base URL, model name, runtime carrier (bundled executable / Node checkout)
+- Settings → Tools → DeepSeek Harness: runtime carrier (bundled executable / Node checkout
+  with a path picker), API key (stored in the OS keychain via PasswordSafe; optional in
+  checkout mode when the checkout's own `.env` carries it), optional base URL, model name.
+- Composer: Context (Current file + AGENTS.md), Context action (Ask / Execute / Plan),
+  and Model (model menu + Off/Low/High/Max effort) tabs with an icon submit.
+- The plugin reads no user-config environment variables.

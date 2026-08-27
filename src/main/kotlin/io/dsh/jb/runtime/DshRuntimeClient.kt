@@ -22,23 +22,31 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
+/** A configuration problem the user must fix in the settings page (roadmap item 10 ask-flow). */
+class DshConfigException(message: String) : IllegalStateException(message)
+
 /**
- * Configuration for one DSH runtime process. Defaults read environment
- * variables (roadmap item 3's agreed config source); tests inject values.
+ * Configuration for one DSH runtime process. Values come from the settings
+ * page via [DshRuntimeConfig.fromSettings] (roadmap item 10, pulled forward
+ * 2026-08-27: the item-3 env-var staging was removed); tests inject values.
  */
 data class DshRuntimeConfig(
-    /** `bundled` (default) uses the single-file exe; `node` uses a DSH checkout. */
-    val mode: String = System.getenv("DSH_RUNTIME_MODE") ?: "bundled",
-    /** Path to the bundled `dsh-jsonrpc-agent-pkg-<platform>-<arch>` executable. */
-    val bundledExe: String = System.getenv("DSH_RUNTIME_EXE") ?: "",
-    /** Path to an installed DSH checkout (node carrier). */
-    val checkoutPath: String = System.getenv("DSH_CHECKOUT") ?: "",
-    /** cordis.yml path handed to the runtime via `DSH_CORDIS_CONFIG`. */
-    val cordisConfig: String = System.getenv("DSH_CORDIS_CONFIG") ?: "",
-    val apiKey: String = System.getenv("DEEPSEEK_API_KEY") ?: "",
-    val baseUrl: String = System.getenv("DEEPSEEK_BASE_URL") ?: "",
+    /** `node` uses a DSH checkout; `bundled` uses the single-file exe (item 12 packaging). */
+    val mode: String,
+    val bundledExe: String = "",
+    val checkoutPath: String = "",
+    /**
+     * Absolute node executable used for the checkout carrier; resolved by
+     * NodeResolver (GUI-launched IDEs do not inherit the shell PATH). Null falls
+     * back to a bare `node` lookup and fails validation for the node carrier.
+     */
+    val nodeExecutable: String? = null,
+    /** cordis.yml path handed to the runtime via `DSH_CORDIS_CONFIG` (item 12 supplies one). */
+    val cordisConfig: String = "",
+    val apiKey: String = "",
+    val baseUrl: String = "",
     val provider: String = "deepseek-official",
-    val model: String = System.getenv("DSH_MODEL") ?: "deepseek-chat",
+    val model: String = "deepseek-chat",
     /** Agent workspace (becomes `DSH_CWD`); default: current dir. */
     val cwd: String = System.getProperty("user.dir"),
     /** JSONL session root (`DSH_SESSION_ROOT`); blank defaults to `<cwd>/.dsh-sessions`. */
@@ -46,7 +54,53 @@ data class DshRuntimeConfig(
     /** Stable session id used for every prompt. */
     val sessionId: String,
     val maxTokens: Int? = null,
-)
+) {
+    /**
+     * Pre-flight validation: returns a human-readable problem or null. Pure JVM —
+     * unit-tested headlessly. The chat panel turns a reported problem into the
+     * proactive ask (notice + settings page), see DshChatPanel.
+     */
+    fun validateForStart(): String? = when {
+        mode == "bundled" && bundledExe.isBlank() ->
+            "Bundled runtime executable path is not configured"
+        mode == "bundled" && !File(bundledExe).isFile ->
+            "Bundled runtime executable not found: $bundledExe"
+        mode == "node" && checkoutPath.isBlank() ->
+            "DeepSeek Harness checkout path is not configured"
+        mode == "node" && nodeExecutable == null ->
+            "Node.js was not found — checked PATH plus common install locations " +
+                "(see Settings → Tools → DeepSeek Harness)"
+        mode == "node" && !File(checkoutPath).isDirectory ->
+            "DSH_CHECKOUT is not a directory: $checkoutPath"
+        else -> null
+    }
+
+    companion object {
+        /**
+         * Builds the config from the settings snapshot plus the keychain-held API key.
+         * No user-config environment variables are read anywhere on this path.
+         */
+        fun fromSettings(
+            settings: io.dsh.jb.settings.DshSettingsSnapshot,
+            apiKey: String?,
+            sessionId: String,
+            cwd: String,
+            cordisConfig: String = "",
+            nodeExecutable: String? = null,
+        ): DshRuntimeConfig = DshRuntimeConfig(
+            mode = settings.mode.ifBlank { "node" },
+            bundledExe = settings.bundledExe.trim(),
+            checkoutPath = settings.checkoutPath.trim(),
+            nodeExecutable = nodeExecutable,
+            cordisConfig = cordisConfig,
+            apiKey = apiKey ?: "",
+            baseUrl = settings.baseUrl.trim(),
+            model = settings.model.trim().ifBlank { io.dsh.jb.settings.ModelCatalog.DEFAULT_MODEL },
+            cwd = cwd,
+            sessionId = sessionId,
+        )
+    }
+}
 
 /**
  * Pure-JVM client for the DSH SDK JSON-RPC runtime: spawns the process,
@@ -178,14 +232,15 @@ class DshRuntimeClient(
 
     private fun resolveCommand(): List<String> = when (config.mode) {
         "node" -> {
+            val node = config.nodeExecutable ?: "node"
             val checkout = File(config.checkoutPath)
             require(checkout.isDirectory) { "DSH_CHECKOUT is not a directory: ${config.checkoutPath}" }
             val built = File(checkout, "packages/examples/jsonrpc-demo/lib/bin.js")
             val source = File(checkout, "packages/examples/jsonrpc-demo/src/bin.ts")
             when {
-                built.isFile -> listOf("node", built.path)
+                built.isFile -> listOf(node, built.path)
                 // Development checkout: run the source bin through the checkout's tsx loader.
-                source.isFile -> listOf("node", "--import", "tsx", source.path)
+                source.isFile -> listOf(node, "--import", "tsx", source.path)
                 else -> throw IllegalStateException("no jsonrpc-demo bin under checkout: ${checkout.path}")
             }
         }

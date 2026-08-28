@@ -36,6 +36,15 @@ plugin packages — the generated per-effort cordis lived in the system temp dir
 bare plugin names resolve by walking up from the config file's directory. The config
 was moved under `<checkout>/.dsh-jb/` — but the user's smoke proved that directory
 wrong too.
+Fix round 8 (user feedback): MISSING_CREDENTIAL fixed — the bundled composition now
+mounts the harness credential store + settings-file services, so the web-entered key
+is read from ~/.dsh/.credentials.yaml with no plugin-side entry.
+Fix round 7 (user feedback): persisted-log id collisions fixed with per-runtime
+nonce session ids; failure notices are now selectable/wrapping and mirrored in full
+to idea.log.
+Fix round 6 (user feedback): no-API-key failures now surface actionable guidance
+in the transcript (one-shot NoticeKind.API_KEY_MISSING + automatic settings open);
+roadmap items 14 (@-mentions) and 15 (compact context attachments, deferred) added.
 Fix round 5 (user smoke + verified mechanism): the harness resolves bare plugin
 packages via the workspace symlinks under `examples/node_modules/@deepseek-ai`
 (111 links), so the config MUST live under `examples/`. The generated file is now
@@ -45,6 +54,20 @@ directory fails with a clear settings-page error. Build stamping added: artifact
 the installed plugin version are named `0.1.0.<yyyyMMddHHmm>` (BUILD_NUMBER env
 override). Re-verified: 90 tests green, buildPlugin green, artifact
 DeepSeekHarnessForJB-0.1.0.<stamp>.zip.
+
+DSH adaptation round (2026-08-28, dsh-v0.1.2-alpha.1): the SDK runtime became the
+main CLI's built-in `sdk` profile (`--profile sdk`, explicit `DSH_HOME` required,
+`DSH_CORDIS_CONFIG` removed; the bundled exe is now
+`deepseek-harness-sdk-runtime-<platform>-<arch>`). The per-effort cordis generation
+was replaced by the `initialize.reasoningEffort` wire field (adapter vocabulary
+`off`/`low`/`high`/`max` maps 1:1 to EffortLevel; the harness's own
+`apps/cli/tests/profiles/sdk/keyless-smoke.e2e.ts` proves `reasoning_effort: max`
+reaches the provider). Removed: `CordisEffort`, the bundled `agent.cordis.yml`
+resource, `CordisEffortTest`; `DshRuntimeClient` carrier commands and process env
+adapted (checkout carrier: `node --import tsx/esm <checkout>/apps/cli/src/bin.ts --profile sdk`);
+the headless e2e drives the real `--profile sdk` runtime against the mock LLM.
+Re-verified: `./gradlew test` and `./gradlew buildPlugin` green against the new
+checkout.
 
 1. `./gradlew test` green — 83 tests total: 3 `CordisEffortTest` (all four efforts +
    untouched sections), 5 `PromptAssemblyTest` (ordering/gating/instructions), 5

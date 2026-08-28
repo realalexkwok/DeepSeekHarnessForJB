@@ -17,33 +17,37 @@
   session-event vocabulary.
 
 ## DSH side (embedded runtime)
+- Verified baseline: dsh-v0.1.2-alpha.1 (2026-08-28). The SDK runtime is the main
+  CLI's built-in `sdk` profile — `dsh ... --profile sdk`; no external cordis file.
 - Two runtime configurations, switchable in settings:
-  1. Bundled single-file executable: `dsh-jsonrpc-agent-pkg-<platform>-<arch>` built from
-     the harness repo (pkg `--sea`, Node 24 inside, ~174 MB, plus its `-rg` sidecar).
-  2. Node + installed DSH checkout: `node <checkout>/packages/examples/jsonrpc-demo/lib/bin.js`
-     (bin `dsh-jsonrpc-agent`, Node ≥ 22.19); the user points the plugin at the checkout
-     path. When the checkout's repo-root `.env` (or environment) already carries
-     `DEEPSEEK_API_KEY`, the user does not need to enter the key in settings.
-- Both carriers receive the plugin's bundled `agent.cordis.yml` via `DSH_CORDIS_CONFIG`.
-- Wire: newline-delimited JSON-RPC 2.0 over stdio — requests `initialize`, `session/prompt`,
-  `shutdown`; notifications `session.event`, `session.status`, `subagent.*`.
-- Composition mirrors the DSH `standard` preset (bash/pwsh, fs read/write/edit/search,
-  plan mode, todo, skills, goals, subagents, web, ask-user) and includes
-  `agent-instructions`, so the agent reads the workspace `AGENTS.md` (root, plus
-  subdirectory files on touch) by default; stdout kept protocol-pure.
+  1. Bundled single-file executable: `deepseek-harness-sdk-runtime-<platform>-<arch>`
+     built from the harness repo (pkg `--sea`, Node 24 inside, ~174 MB, plus its
+     `-rg` sidecar), invoked as `<exe> --profile sdk`.
+  2. Node + installed DSH checkout: `node --import tsx/esm <checkout>/apps/cli/src/bin.ts --profile sdk`
+     (built fallback: `<checkout>/node_modules/@deepseek-ai/dsh/lib/bin.js --profile sdk`,
+     Node ≥ 22.19). When the checkout's repo-root `.env` (or environment) already
+     carries `DEEPSEEK_API_KEY`, the user does not need to enter the key in settings.
+- Process env: `DSH_HOME` (explicit — required by the `sdk` profile; default the
+  user's `~/.dsh`), `DSH_PERMISSION_MODE` (danger-full-access until roadmap item 8
+  wires dialogs), `DSH_TELEMETRY_DISABLED=1`, plus `DEEPSEEK_API_KEY` /
+  `DEEPSEEK_BASE_URL` when set. The agent workspace comes from `initialize.cwd` only.
+- Wire: newline-delimited JSON-RPC 2.0 over stdio — requests `initialize`,
+  `session/prompt`, `shutdown`; notifications `session.event`, `session.status`,
+  `subagent.*`. `initialize` accepts optional `reasoningEffort`
+  (`off`|`low`|`high`|`max`) and validates the provider/model route at handshake.
+- The `sdk` profile carries the coding toolset (bash/pwsh, fs read/write/edit/search,
+  plan mode, todo, skills, goals, subagents, web) over the harness base bundle;
+  stdout is protocol-pure by design.
 - Node.js resolution: GUI-launched IDEs do not inherit the shell PATH, so the plugin
   resolves node via a candidate list (bare `node`, homebrew/MacPorts/system paths,
   volta/asdf/nvm/fnm) and spawns the runtime with the resolved absolute path.
-- Runtime pool: one process per (model, effort) selection; the plugin bundles the
-  SDK's agent composition (`agent.cordis.yml`) and generates a per-effort variant
-  (`llm-deepseek: { thinking, reasoningEffort }`) handed to each runtime via
-  `DSH_CORDIS_CONFIG` — effort needs no protocol change. The generated config is
-  written next to the checkout's own cordis.yml
-  (`<checkout>/examples/jsonrpc-agent/`, node mode) or next to the bundled exe:
-  bare plugin packages resolve through the workspace symlinks under
-  `examples/node_modules`. Model discovery is the
-  plugin's own `GET {base}/models` HTTP call with the keychain key (fallback: the
-  harness adapter catalog); the chosen id is passed to `initialize.model`.
+- Runtime pool: one process per (model, effort) selection; effort rides the
+  `initialize.reasoningEffort` wire field (adapter vocabulary `off`/`low`/`high`/`max`
+  maps 1:1 to the UI's Off/Low/High/Max). The previous per-effort cordis generation
+  (`agent.cordis.yml` + `DSH_CORDIS_CONFIG`) was removed in the 2026-08-28 DSH
+  adaptation. Model discovery is the plugin's own `GET {base}/models` HTTP call with
+  the keychain key (fallback: the harness adapter catalog); the chosen id is passed
+  to `initialize.model`.
 - Config: the settings page (Settings → Tools → DeepSeek Harness) holds the runtime
   carrier (bundled exe / node checkout with a path picker), the API key stored in the
   OS keychain via `PasswordSafe` (optional in checkout mode when the checkout already

@@ -34,6 +34,10 @@ in the spirit of the built-in AI agent (AI Assistant Agent mode / Gemini in Andr
 - Human-in-the-loop: before every write to disk, an ask-user-question round covering
   requirements (scope/decisions/context), plan (task groups), and validation (success
   criteria) must be answered by the user.
+- Two-sided verification: every verification has an automatic half (the agent's
+  gradle test/build) AND a manual half (the user installs the built plugin from the
+  host machine and checks it in the IDE); every report names the built artifact's
+  absolute path.
 - IDE-native: platform look and feel; no embedded web shell for core UX.
 - Harness-native: DSH owns the agent; the plugin owns the bridge and presentation only.
 - Open model input: DeepSeek API key plus any OpenAI-compatible base URL.

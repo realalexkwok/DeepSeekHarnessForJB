@@ -25,6 +25,8 @@ data class InitializeParams(
     val cwd: String,
     val provider: String,
     val model: String,
+    /** Optional adapter-owned reasoning effort (dsh-v0.1.2-alpha.1+). */
+    val reasoningEffort: String? = null,
     val maxTokens: Int? = null,
 )
 

@@ -1,12 +1,12 @@
 package io.dsh.jb.runtime
 
-import java.io.File
-
 /**
  * Reasoning-effort levels exposed in the composer Model tab (roadmap item 10/6/11
- * pulled forward). Wire ids match the harness adapter vocabulary
- * (llm-deepseek serialize.spec.ts): off = thinking disabled; low/high/max =
- * thinking enabled with that wire reasoning_effort.
+ * pulled forward). Wire ids match the harness adapter vocabulary: off = thinking
+ * disabled; low/high/max = thinking enabled with that wire reasoning_effort.
+ * Since dsh-v0.1.2-alpha.1 the effort rides the `initialize.reasoningEffort`
+ * wire field — no cordis patching (the previous CordisEffort design was removed
+ * in the 2026-08-28 DSH adaptation).
  */
 enum class EffortLevel(val wire: String, val display: String) {
     OFF("off", "Off"),
@@ -26,36 +26,13 @@ enum class EffortLevel(val wire: String, val display: String) {
  */
 data class RuntimeKey(val model: String, val effort: EffortLevel)
 
-/**
- * Patches the bundled agent composition for one effort level: the llm-deepseek
- * block's thinking/reasoningEffort lines are rewritten (each appears exactly once).
- * Pure string function — unit-tested headlessly.
- */
-object CordisEffort {
-    private val THINKING = Regex("(?m)^(\\s*)thinking:\\s*\\S+")
-    private val EFFORT = Regex("(?m)^(\\s*)reasoningEffort:\\s*\\S+")
+/** Builds a per-runtime session id; the nonce makes repeated runs collision-free. */
+fun buildSessionId(locationHash: String, key: RuntimeKey, nonce: String): String =
+    "jb-" + locationHash + "-" + key.effort.wire + "-" +
+        key.model.replace(Regex("[^A-Za-z0-9._-]"), "-") + "-" + nonce
 
-    fun apply(base: String, effort: EffortLevel): String {
-        val thinking = if (effort == EffortLevel.OFF) "disabled" else "enabled"
-        return base
-            .replace(THINKING) { it.groupValues[1] + "thinking: " + thinking }
-            .replace(EFFORT) { it.groupValues[1] + "reasoningEffort: " + effort.wire }
-    }
+/** A fresh 8-hex-character runtime nonce. */
+fun newSessionNonce(): String =
+    java.util.UUID.randomUUID().toString().replace("-", "").take(8)
 
-    /**
-     * Directory the generated per-effort cordis must live in (fix round 5,
-     * 2026-08-27): the harness resolves bare plugin packages via the workspace
-     * symlinks under examples/node_modules, so the config must live UNDER
-     * examples/ — next to the checkout's own cordis.yml
-     * (<checkout>/examples/jsonrpc-agent). Bundled mode uses the bundled exe's
-     * directory. Null for a bundled carrier without an exe — such a config never
-     * spawns (validation fails first). Pure — unit-tested headlessly.
-     */
-    fun directoryFor(mode: String, checkoutPath: String, bundledExe: String): File? = when {
-        mode == "bundled" && bundledExe.isNotBlank() ->
-            File(bundledExe).absoluteFile.parentFile
-        mode == "bundled" -> null
-        else -> File(checkoutPath.trim(), "examples/jsonrpc-agent")
-    }
-}
 

@@ -7,12 +7,14 @@ import io.dsh.jb.chat.ChatTranscriptModel
 import io.dsh.jb.chat.NoticeKind
 import io.dsh.jb.chat.NoticeRow
 import io.dsh.jb.chat.UserRow
+import io.dsh.jb.diff.FsDiffParser
 import io.dsh.jb.events.AssistantChunkEvent
 import io.dsh.jb.events.AssistantMessageEvent
 import io.dsh.jb.events.EventMapper
 import io.dsh.jb.events.MalformedEventData
 import io.dsh.jb.events.StepStartEvent
 import io.dsh.jb.events.TurnEndEvent
+import io.dsh.jb.events.ToolResultEvent
 import io.dsh.jb.events.TurnStartEvent
 import io.dsh.jb.events.UserMessageEvent
 import io.dsh.jb.protocol.SessionEventNotification
@@ -36,7 +38,7 @@ import org.junit.Test
  * Headless end-to-end test: the real DSH runtime from the checkout, driven by
  * [DshRuntimeClient], against a JDK-hosted mock LLM — no API key needed.
  * Mirrors the harness repo's own keyless smoke
- * (`examples/jsonrpc-agent/tests/keyless-smoke.e2e.ts`).
+ * (`apps/cli/tests/profiles/sdk/keyless-smoke.e2e.ts`, dsh-v0.1.2-alpha.1+).
  */
 class DshRuntimeE2eTest {
 
@@ -44,15 +46,21 @@ class DshRuntimeE2eTest {
 
     @Test
     fun `initialize prompt and shutdown against checkout runtime with mock llm`() = runBlocking {
-        val bin = File(checkout, "packages/examples/jsonrpc-demo/src/bin.ts")
-        val config = File(checkout, "examples/jsonrpc-agent/cordis.yml")
-        assumeTrue("DSH checkout runtime not available at $checkout", bin.isFile && config.isFile)
+        // dsh-v0.1.2-alpha.1+: the SDK runtime is the main CLI's built-in `sdk`
+        // profile (source checkout runs via the checkout's tsx loader).
+        val bin = File(checkout, "apps/cli/src/bin.ts")
+        assumeTrue("DSH checkout runtime not available at $checkout", bin.isFile)
 
+        val requestCount = java.util.concurrent.atomic.AtomicInteger(0)
         val modelServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         modelServer.createContext("/") { exchange ->
             // The DeepSeek adapter streams; answer with the same SSE shape the
-            // harness's own keyless smoke uses. Connection: close prevents
-            // keep-alive sockets from hanging HttpServer.stop(0) (JDK quirk).
+            // harness's own keyless smoke uses. The mock is STATEFUL (roadmap item 7):
+            // request 1 emits a read tool call (the fs observation policy requires a
+            // prior read), request 2 emits a write call, later requests emit text.
+            // Connection: close prevents keep-alive sockets from hanging
+            // HttpServer.stop(0) (JDK quirk).
+            val n = requestCount.incrementAndGet()
             val headers = exchange.responseHeaders
             headers.add("Content-Type", "text/event-stream")
             headers.add("Connection", "close")
@@ -61,9 +69,23 @@ class DshRuntimeE2eTest {
             fun sse(data: String) {
                 out.write("data: $data\n\n".toByteArray(Charsets.UTF_8))
             }
-            sse("""{"choices":[{"delta":{"role":"assistant","content":null}}]}""")
-            sse("""{"choices":[{"delta":{"content":"done"}}]}""")
-            sse("""{"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}""")
+            when (n) {
+                1 -> {
+                    sse("""{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":""}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"hello.txt\"}"}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"content":""},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}""")
+                }
+                2 -> {
+                    sse("""{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"write","arguments":""}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"hello.txt\",\"content\":\"new content\"}"}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"content":""},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}""")
+                }
+                else -> {
+                    sse("""{"choices":[{"delta":{"role":"assistant","content":null}}]}""")
+                    sse("""{"choices":[{"delta":{"content":"done"}}]}""")
+                    sse("""{"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}""")
+                }
+            }
             out.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
             out.close()
             exchange.close()
@@ -77,11 +99,13 @@ class DshRuntimeE2eTest {
             DshRuntimeConfig(
                 mode = "node",
                 checkoutPath = checkout,
-                cordisConfig = config.path,
                 apiKey = "keyless-e2e-no-call",
                 baseUrl = "http://127.0.0.1:$port",
                 provider = "deepseek-official",
                 model = "deepseek-v4-pro",
+                reasoningEffort = "max",
+                harnessHome = File(root, ".dsh").path,
+                permissionMode = "danger-full-access",
                 cwd = root.path,
                 sessionId = "e2e-main",
             ),
@@ -96,7 +120,11 @@ class DshRuntimeE2eTest {
             val init = client.start()
             assertEquals("deepseek-harness-sdk-runtime", init.serverInfo.name)
 
-            val prompt = client.prompt("say done")
+            // Roadmap item 7: seed the workspace file the mock tool calls operate on.
+            val hello = File(root, "hello.txt")
+            hello.writeText("old content\n")
+
+            val prompt = client.prompt("update hello.txt")
             assertTrue(prompt.messageId.isNotBlank())
 
             // Wait for the whole-agent idle status plus the committed assistant message.
@@ -145,6 +173,17 @@ class DshRuntimeE2eTest {
             assertTrue("assistant text should carry the mock output", assistants.any { it.text.contains("done") })
             assertTrue("expected turn notices", ts.rows.any { it is NoticeRow && it.kind == NoticeKind.TURN_START })
             assertTrue("agent should be idle at the end", !ts.running)
+
+            // Roadmap item 7: the REAL fs tool result must carry a parsable diff meta.
+            val diffs = views
+                .filter { it.data is ToolResultEvent }
+                .mapNotNull { FsDiffParser.parse((it.data as ToolResultEvent).meta) }
+                .flatten()
+            assertTrue(
+                "expected a diff for hello.txt, got: $diffs",
+                diffs.any { it.path == "hello.txt" && it.oldText == "old content" && it.newText == "new content" },
+            )
+            assertEquals("new content", hello.readText().trim())
 
             client.shutdown()
         } catch (t: Throwable) {

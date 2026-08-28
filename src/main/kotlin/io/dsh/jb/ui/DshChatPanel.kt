@@ -28,6 +28,8 @@ import io.dsh.jb.chat.ToolCardStatus
 import io.dsh.jb.chat.TranscriptRow
 import io.dsh.jb.chat.TranscriptState
 import io.dsh.jb.chat.UserRow
+import io.dsh.jb.diff.FileChange
+import io.dsh.jb.diff.FsDiffParser
 import io.dsh.jb.events.TodoItem
 import io.dsh.jb.events.TodoStatus
 import io.dsh.jb.runtime.DshConfigException
@@ -127,6 +129,8 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     private var wasAtBottom = true
     private var modelIds: List<String> = emptyList()
     private var populatingModels = false
+    private var settingsOpenedForKey = false
+    private val loggedFailureIds = HashSet<String>()
 
     @Volatile
     private var startedOk = false
@@ -159,9 +163,13 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val argsArea: JBTextArea,
         val resultArea: JBTextArea,
         val errorLabel: JBLabel,
+        val diffButton: JButton,
         val metaToggle: JButton,
         val metaArea: JBTextArea,
-    )
+    ) {
+        /** Parsed result-time diffs, or null when the card shows the plain result. */
+        var diffs: List<FileChange>? = null
+    }
 
     init {
         val header = JPanel(BorderLayout())
@@ -333,10 +341,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     private suspend fun startRuntime(noticeText: String) {
         try {
-            DshRuntimeService.getInstance(project).startFor(currentKey())
+            val service = DshRuntimeService.getInstance(project)
+            val key = currentKey()
+            service.startFor(key)
             startedOk = true
             ApplicationManager.getApplication().invokeLater {
-                if (noticeText.isNotEmpty()) model.notice(noticeText)
+                model.notice(
+                    "New session ${service.sessionIdFor(key)} started" +
+                        if (noticeText.isNotEmpty()) " — $noticeText" else "",
+                )
                 render(model.state())
             }
         } catch (e: Exception) {
@@ -406,6 +419,22 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         }
         planBadge.isVisible = state.planMode
 
+        // One-shot proactive ask when the API key is missing (roadmap item 10).
+        if (!settingsOpenedForKey &&
+            state.rows.any { it is NoticeRow && it.kind == NoticeKind.API_KEY_MISSING }
+        ) {
+            settingsOpenedForKey = true
+            ShowSettingsUtil.getInstance().showSettingsDialog(project, DshSettingsConfigurable::class.java)
+        }
+
+        // Mirror every failure notice's FULL text to idea.log once (2026-08-28),
+        // so the log always carries the complete error even when the UI is small.
+        for (row in state.rows) {
+            if (row is NoticeRow && loggedFailureIds.add(row.id) && isFailureNotice(row)) {
+                logger.warn("DSH transcript failure: ${row.text}")
+            }
+        }
+
         val seen = HashSet<String>()
         var changed = false
         for (row in state.rows) {
@@ -439,6 +468,26 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             }
         }
     }
+
+    /**
+     * Whole-file diff fallback (harness-documented behavior): when a write/edit
+     * result carries no contextual hunks (creates, declined basis), show the
+     * current file content as a "(new file)" diff. Workspace-confined.
+     */
+    private fun fallbackDiff(toolName: String, arguments: String): List<FileChange>? {
+        val path = FsDiffParser.filePathFromArguments(toolName, arguments) ?: return null
+        val base = File(project.basePath ?: ".").canonicalFile
+        val target = File(base, path).canonicalFile
+        val basePrefix = base.path + File.separator
+        if (target != base && !target.path.startsWith(basePrefix)) return null
+        val content = runCatching { target.readText() }.getOrNull() ?: return null
+        return listOf(FileChange(path, null, content))
+    }
+
+    private fun isFailureNotice(row: NoticeRow): Boolean =
+        row.kind == NoticeKind.API_KEY_MISSING ||
+            (row.kind == NoticeKind.NOTICE && row.text.contains("failed", ignoreCase = true)) ||
+            (row.kind == NoticeKind.TURN_END && row.text.contains("error", ignoreCase = true))
 
     private fun trackScroll() {
         val bar = scroll.verticalScrollBar
@@ -499,12 +548,18 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val argsArea = transcriptText(mono = true)
         val resultArea = transcriptText()
         val errorLabel = JBLabel("").apply { foreground = JBColor(0xc0392b, 0xe06c75) }
+        val diffButton = JButton("Diff").apply { isVisible = false }
         val metaToggle = JButton("raw meta ▸")
         val metaArea = transcriptText(mono = true).apply { isVisible = false }
         val body = JPanel(BorderLayout())
-        body.add(argsArea, BorderLayout.NORTH)
-        body.add(resultArea, BorderLayout.CENTER)
-        body.add(errorLabel, BorderLayout.SOUTH)
+        val controls = JPanel(BorderLayout(8, 0))
+        controls.add(diffButton, BorderLayout.WEST)
+        controls.add(errorLabel, BorderLayout.EAST)
+        body.add(controls, BorderLayout.NORTH)
+        val content = JPanel(BorderLayout())
+        content.add(argsArea, BorderLayout.NORTH)
+        content.add(resultArea, BorderLayout.CENTER)
+        body.add(content, BorderLayout.CENTER)
         val metaWrap = JPanel(BorderLayout())
         metaWrap.add(metaToggle, BorderLayout.NORTH)
         metaWrap.add(metaArea, BorderLayout.CENTER)
@@ -517,7 +572,12 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             metaToggle.text = if (show) "raw meta ▾" else "raw meta ▸"
             panel.revalidate()
         }
-        val parts = ToolParts(panel, header, argsArea, resultArea, errorLabel, metaToggle, metaArea)
+        val parts = ToolParts(panel, header, argsArea, resultArea, errorLabel, diffButton, metaToggle, metaArea)
+        diffButton.addActionListener {
+            parts.diffs?.let { d ->
+                DshDiffDialog(project, File(project.basePath ?: "."), d).show()
+            }
+        }
         parts.update(row)
         return parts
     }
@@ -525,12 +585,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     private fun noticePanel(row: NoticeRow): JComponent {
         val panel = JPanel(BorderLayout())
         panel.border = JBUI.Borders.empty(2, 12)
-        val label = JBLabel(row.text).apply {
+        // Selectable + wrapping so the full text is visible and copyable (2026-08-28).
+        val label = transcriptText().apply {
+            text = row.text
             foreground = JBColor.GRAY
             font = font.deriveFont(Font.ITALIC, font.size2D - 1f)
         }
         when (row.kind) {
-            NoticeKind.PLAN_MODE -> label.foreground = JBColor(0xb26b00, 0xdfb14a)
+            NoticeKind.PLAN_MODE, NoticeKind.API_KEY_MISSING ->
+                label.foreground = JBColor(0xb26b00, 0xdfb14a)
             NoticeKind.APPROVAL_ASKED, NoticeKind.APPROVAL_DECIDED ->
                 label.font = label.font.deriveFont(Font.BOLD, label.font.size2D)
             else -> Unit
@@ -564,6 +627,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val errorText = row.errorName.orEmpty() + row.errorCode?.let { " ($it)" }.orEmpty()
         errorLabel.text = errorText
         errorLabel.isVisible = row.isError
+        val parsed = FsDiffParser.parse(row.meta)
+        diffs = parsed ?: fallbackDiff(row.name, row.arguments)
+        diffButton.isVisible = diffs != null
+        diffs?.let { diffButton.text = "Diff (${it.size} file${if (it.size == 1) "" else "s"})" }
         metaToggle.isVisible = row.meta != null
         if (row.meta != null && metaArea.text.isEmpty()) {
             metaArea.text = prettyJson(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(row.meta))

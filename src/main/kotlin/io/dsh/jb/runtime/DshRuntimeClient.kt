@@ -41,16 +41,18 @@ data class DshRuntimeConfig(
      * back to a bare `node` lookup and fails validation for the node carrier.
      */
     val nodeExecutable: String? = null,
-    /** cordis.yml path handed to the runtime via `DSH_CORDIS_CONFIG` (item 12 supplies one). */
-    val cordisConfig: String = "",
     val apiKey: String = "",
     val baseUrl: String = "",
     val provider: String = "deepseek-official",
     val model: String = "deepseek-chat",
-    /** Agent workspace (becomes `DSH_CWD`); default: current dir. */
+    /** Adapter-owned reasoning effort, sent at initialize (dsh-v0.1.2-alpha.1+). */
+    val reasoningEffort: String = "max",
+    /** Explicit harness home (`DSH_HOME`) required by the built-in `sdk` profile. */
+    val harnessHome: String = "${System.getProperty("user.home")}/.dsh",
+    /** Permission mode until roadmap item 8 wires real dialogs. */
+    val permissionMode: String = "danger-full-access",
+    /** Agent workspace (becomes `initialize.cwd`); default: current dir. */
     val cwd: String = System.getProperty("user.dir"),
-    /** JSONL session root (`DSH_SESSION_ROOT`); blank defaults to `<cwd>/.dsh-sessions`. */
-    val sessionRoot: String = "",
     /** Stable session id used for every prompt. */
     val sessionId: String,
     val maxTokens: Int? = null,
@@ -85,14 +87,12 @@ data class DshRuntimeConfig(
             apiKey: String?,
             sessionId: String,
             cwd: String,
-            cordisConfig: String = "",
             nodeExecutable: String? = null,
         ): DshRuntimeConfig = DshRuntimeConfig(
             mode = settings.mode.ifBlank { "node" },
             bundledExe = settings.bundledExe.trim(),
             checkoutPath = settings.checkoutPath.trim(),
             nodeExecutable = nodeExecutable,
-            cordisConfig = cordisConfig,
             apiKey = apiKey ?: "",
             baseUrl = settings.baseUrl.trim(),
             model = settings.model.trim().ifBlank { io.dsh.jb.settings.ModelCatalog.DEFAULT_MODEL },
@@ -145,9 +145,10 @@ class DshRuntimeClient(
                 val env = environment()
                 if (config.apiKey.isNotBlank()) env["DEEPSEEK_API_KEY"] = config.apiKey
                 if (config.baseUrl.isNotBlank()) env["DEEPSEEK_BASE_URL"] = config.baseUrl
-                env["DSH_CWD"] = config.cwd
-                env["DSH_SESSION_ROOT"] = config.sessionRoot.ifBlank { File(config.cwd, ".dsh-sessions").path }
-                if (config.cordisConfig.isNotBlank()) env["DSH_CORDIS_CONFIG"] = config.cordisConfig
+                // The built-in `sdk` profile requires an explicit harness home.
+                env["DSH_HOME"] = config.harnessHome
+                env["DSH_PERMISSION_MODE"] = config.permissionMode
+                env["DSH_TELEMETRY_DISABLED"] = "1"
             }
             .start()
         process = proc
@@ -173,6 +174,7 @@ class DshRuntimeClient(
                         cwd = config.cwd,
                         provider = config.provider,
                         model = config.model,
+                        reasoningEffort = config.reasoningEffort,
                         maxTokens = config.maxTokens,
                     ),
                 ),
@@ -235,18 +237,18 @@ class DshRuntimeClient(
             val node = config.nodeExecutable ?: "node"
             val checkout = File(config.checkoutPath)
             require(checkout.isDirectory) { "DSH_CHECKOUT is not a directory: ${config.checkoutPath}" }
-            val built = File(checkout, "packages/examples/jsonrpc-demo/lib/bin.js")
-            val source = File(checkout, "packages/examples/jsonrpc-demo/src/bin.ts")
+            val builtBin = File(checkout, "node_modules/@deepseek-ai/dsh/lib/bin.js")
+            val sourceBin = File(checkout, "apps/cli/src/bin.ts")
             when {
-                built.isFile -> listOf(node, built.path)
-                // Development checkout: run the source bin through the checkout's tsx loader.
-                source.isFile -> listOf(node, "--import", "tsx", source.path)
-                else -> throw IllegalStateException("no jsonrpc-demo bin under checkout: ${checkout.path}")
+                builtBin.isFile -> listOf(node, builtBin.path, "--profile", "sdk")
+                // Development checkout: run the CLI source through the checkout's tsx loader.
+                sourceBin.isFile -> listOf(node, "--import", "tsx/esm", sourceBin.path, "--profile", "sdk")
+                else -> throw IllegalStateException("no dsh CLI bin under checkout: ${checkout.path}")
             }
         }
         else -> {
             require(File(config.bundledExe).isFile) { "bundled runtime exe missing: ${config.bundledExe}" }
-            listOf(config.bundledExe)
+            listOf(config.bundledExe, "--profile", "sdk")
         }
     }
 

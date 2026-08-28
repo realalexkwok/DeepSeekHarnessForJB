@@ -22,6 +22,15 @@ must be answered by the user.
   requirements, plan, validation.
 - Feature specs live in `specs/YYYY-MM-DD-feature-name/` with `requirements.md`,
   `plan.md`, `validation.md`.
+### Verification
+- Every verification has TWO halves and BOTH are required before merge:
+  1. Automatic — the agent runs `./gradlew test` and `./gradlew buildPlugin` and
+     reports the results.
+  2. Manual — the user installs the built plugin from the host machine and checks
+     it in the IDE.
+- Every verification report MUST include the ABSOLUTE PATH of the built plugin
+  artifact (`build/distributions/DeepSeekHarnessForJB-0.1.0.<stamp>.zip`), so the
+  user can download and install it for the manual half.
 ### Commits
 - Never commit unless (a) the user explicitly tells you to, or (b) the validation
   for the current phase/plan/task/item has passed and the user has been asked.

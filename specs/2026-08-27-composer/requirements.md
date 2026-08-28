@@ -22,16 +22,16 @@ Spec date: 2026-08-27
   "Custom…" entry opening the settings page) and an "Effort" radio submenu (Off / Low
   / High / Max), plus a "Settings…" item. Selection state survives popup close/open.
 - Runtime pool: one runtime process per (model, effort) selection, per the user's
-  design. Effort is implemented WITHOUT protocol changes: the plugin bundles the SDK's
-  agent composition (`agent.cordis.yml`, copied from the checkout's
-  `examples/jsonrpc-agent/cordis.yml` — the SDK runner requires `DSH_CORDIS_CONFIG`
-  and has no built-in fallback) and generates a per-effort variant
-  (`llm-deepseek: { thinking, reasoningEffort }` — off = thinking disabled, low/high/max
-  = thinking enabled with that wire effort; ids verified against the harness adapter).
+  design. Since the dsh-v0.1.2-alpha.1 adaptation (2026-08-28), effort rides the
+  `initialize.reasoningEffort` wire field against the built-in `sdk` profile
+  (`off` = thinking disabled; `low`/`high`/`max` = thinking enabled with that wire
+  effort — 1:1 with the adapter vocabulary). The previous per-effort cordis
+  generation was removed in the same adaptation.
 - Settings page polish: "Bundled executable" description label (single-file
-  `dsh-jsonrpc-agent-pkg-<platform>-<arch>` Node SEA binary; ships with the plugin in
-  item 12 — leave blank until then), a Node.js version indicator, and pre-spawn
-  Node.js validation for the checkout carrier (injectable probe, unit-tested).
+  `deepseek-harness-sdk-runtime-<platform>-<arch>` Node SEA binary; ships with the
+  plugin in item 12 — leave blank until then), a Node.js version indicator, and
+  pre-spawn Node.js validation for the checkout carrier (injectable probe,
+  unit-tested).
 
 ## Decisions (agreed with the user, 2026-08-27)
 - Effort = one runtime per level (user's design); the pool key is (model, effort) —
@@ -64,22 +64,40 @@ Spec date: 2026-08-27
   uses the resolved absolute path
   (`DshRuntimeConfig.nodeExecutable`); the settings indicator shows version + path.
 - Tab content is popup menus, not fixed panels (user feedback).
+- Credential store (2026-08-28): the built-in `sdk` profile composes the harness
+  `@deepseek-ai/dsh-settings-file` (`$DSH_HOME/settings.yaml`) and
+  `@deepseek-ai/dsh-credentials-local` (`$DSH_HOME/.credentials.yaml`) over the
+  base bundle — the same machine-local stores the harness web Models page writes —
+  so a key entered in the web page flows into the plugin runtime automatically
+  (mirrors the harness headless-agent composition). The plugin-side key remains an
+  optional alternative.
+- Session ids (2026-08-28): the SDK runtime does not resume persisted sessions (it
+  creates with an empty seed), so stable ids collide on a second run in the same
+  project. Session ids are per-runtime unique — `jb-<hash>-<effort>-<model>-<nonce>` —
+  and each runtime start announces "New session <id> started". Failure notices are
+  selectable/wrapping in the transcript and mirrored in full to idea.log.
+- No-API-key ask (2026-08-27): checkout mode reuses the checkout's own `.env` (the
+  runtime's `loadEnv` loads `<checkout>/.env` automatically); if the key lives only
+  in the harness web page's storage, it is entered once in Settings → Tools → DeepSeek
+  Harness (OS keychain). A no-API-key stream/turn failure appends a one-shot guidance
+  notice (NoticeKind.API_KEY_MISSING) and the chat panel opens the settings page
+  automatically on the first occurrence.
 
 ## Context
-- Cordis placement (fix round 5, 2026-08-27): the generated per-effort cordis is
-  written as `<checkout>/examples/jsonrpc-agent/.dsh-jb-effort-<level>.yml` (node
-  mode) or next to the bundled exe (bundled mode). Verified mechanism: the harness
-  resolves bare plugin packages via the workspace symlinks under
-  `examples/node_modules/@deepseek-ai`, so the config MUST live under `examples/`
-  — next to the checkout's own cordis.yml. A missing canonical directory fails with a
-  clear settings-page error.
-- Wire constraints honored: no effort field and no model-listing method on the SDK
-  protocol (verified against `packages/sdk/protocol/src/types.ts` and the sdk
-  packages); the cordis-injection and HTTP-discovery designs avoid both.
-- Harness facts verified: adapter catalog ids/names (`packages/llm/llm-deepseek`
-  index.ts), effort ids (`serialize.spec.ts`: off → disabled thinking; low/high/max →
-  wire reasoning_effort), public base URL `https://api.deepseek.com`, SDK runner
-  requires `DSH_CORDIS_CONFIG`.
+- Credential store (2026-08-28 update): the built-in `sdk` profile composes the
+  harness settings/credentials plugins over `$DSH_HOME` (settings.yaml,
+  .credentials.yaml) — the same machine-local stores the harness web Models page
+  writes — so a key entered in the web page flows into the plugin runtime
+  automatically. The plugin-side key remains an optional alternative.
+- Wire constraints: `initialize.reasoningEffort` exists since dsh-v0.1.2-alpha.1
+  (verified against `packages/sdk/protocol/src/types.ts` and the harness's own
+  `apps/cli/tests/profiles/sdk/keyless-smoke.e2e.ts`, which asserts
+  `reasoning_effort: max` reaches the provider); there is still no model-listing
+  method on the SDK protocol, so model discovery stays the plugin's own HTTP call.
+- Harness facts verified (dsh-v0.1.2-alpha.1): adapter effort vocabulary
+  `off`/`low`/`high`/`max` (`packages/llm/llm-deepseek/src/serialize.ts`), public
+  base URL `https://api.deepseek.com`, the SDK runtime is the main CLI's
+  `--profile sdk` (no `DSH_CORDIS_CONFIG`).
 - Pulls forward: item 6's context picker subset (Current file + AGENTS.md; "workspace
   rules" remains for item 6) and item 11's composer actions (Ask/Execute/Plan; Fix
   pending). Roadmap annotated accordingly.

@@ -8,7 +8,11 @@ High-level implementation order, one small phrase of work per item.
 3. The feature lives under specs/YYYY-MM-DD-feature-name/ with:
    - requirements.md — scope, decisions, context
    - plan.md — numbered task groups
-   - validation.md — how we know the implementation succeeded and can merge
+   - validation.md — how we know the implementation succeeded and can merge;
+     always lists BOTH automatic criteria (gradle test/build) and manual criteria
+     (user installs and checks the plugin in the IDE from the host machine), and
+     every report names the built artifact's absolute path
+     (`build/distributions/DeepSeekHarnessForJB-0.1.0.<stamp>.zip`)
 4. Work refers to specs/mission.md and specs/tech-stack.md for guidance.
 
 ## Items
@@ -35,3 +39,7 @@ High-level implementation order, one small phrase of work per item.
     editor-selection context actions on demand remain for this item.
 12. Packaging: bundle DSH runtime + agent composition; buildPlugin artifact
 13. Verification: unit tests, runPlugin smoke, README
+14. Composer @-mentions: type '@' to pick project files and insert them as context
+    (added 2026-08-27 per user request; implemented in roadmap order)
+15. Composer context attachments: collapsed compact view instead of inline full
+    content (added 2026-08-27; deferred — replanned after all tasks per user)

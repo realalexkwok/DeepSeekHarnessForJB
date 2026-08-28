@@ -49,3 +49,18 @@ Spec date: 2026-08-26
   no prompt-cancel, no server-to-client requests.
 - The harness repo's own keyless JSON-RPC smoke (mock LLM over HTTP) is the reference
   pattern for the e2e test.
+
+## Adaptation to dsh-v0.1.2-alpha.1 (2026-08-28)
+- The dedicated SDK runner (`packages/examples/jsonrpc-demo`, bin `dsh-jsonrpc-agent`)
+  and `examples/jsonrpc-agent/cordis.yml` were removed upstream. The SDK runtime is
+  now the main CLI's built-in profile: `node --import tsx/esm <checkout>/apps/cli/src/bin.ts --profile sdk`
+  (built fallback `<checkout>/node_modules/@deepseek-ai/dsh/lib/bin.js --profile sdk`);
+  the bundled single-file exe was renamed
+  `deepseek-harness-sdk-runtime-<platform>-<arch>` and takes `--profile sdk`.
+- `DSH_CORDIS_CONFIG` is gone; the process env is now `DSH_HOME` (explicit, required),
+  `DSH_PERMISSION_MODE`, `DSH_TELEMETRY_DISABLED`; the agent workspace comes from
+  `initialize.cwd` only (`DSH_CWD`/`DSH_SESSION_ROOT` are dead).
+- `initialize` gained optional `reasoningEffort` and now validates the provider/model
+  route via `resolveCallConfig` at handshake.
+- Supersedes the original carrier/config decisions above; `specs/tech-stack.md` owns
+  the current wording.

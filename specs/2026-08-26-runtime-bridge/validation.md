@@ -19,3 +19,6 @@ How we know this feature succeeded and can merge.
 `JsonRpcCodec` tests + the headless e2e driving the real checkout runtime against a mock
 LLM), `buildPlugin` still succeeds, and no new external dependency was added (JUnit 4 is
 test-scope, recorded in tech-stack.md). Awaiting the user's review (criterion 5).
+2026-08-28 (DSH adaptation): re-verified against dsh-v0.1.2-alpha.1 — the e2e now
+drives the built-in `--profile sdk` runtime; see the adaptation section in
+requirements.md.

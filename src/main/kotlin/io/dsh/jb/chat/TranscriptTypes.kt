@@ -56,6 +56,8 @@ data class ToolCardRow(
 
 enum class NoticeKind {
     TURN_START, TURN_END, STEP, PLAN_MODE, APPROVAL_ASKED, APPROVAL_DECIDED, NOTICE,
+    /** Actionable guidance after a no-API-key failure (the panel opens settings once). */
+    API_KEY_MISSING,
 }
 
 /** A single-line audit entry (turn/step boundaries, plan mode, approvals, local errors). */

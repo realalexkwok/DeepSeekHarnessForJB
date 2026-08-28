@@ -218,4 +218,29 @@ class ChatTranscriptModelTest {
         assertEquals("max tokens", renderTurnEndReason(MaxTokensEnd()))
         assertEquals("unknown", renderTurnEndReason(RawTurnEndReason()))
     }
+
+    @Test
+    fun `no api key finish appends guidance exactly once`() {
+        val m = ChatTranscriptModel()
+        m.onEvent(event("assistant/chunk", """{"turn":1,"step":1,"chunk":{"type":"finish","reason":{"kind":"error","failure":{"message":"llm-deepseek: no API key for provider route","code":"NO_KEY"}}}}"""))
+        val guidance = m.state().rows.filterIsInstance<NoticeRow>().filter { it.kind == NoticeKind.API_KEY_MISSING }
+        assertEquals(1, guidance.size)
+        assertTrue(guidance[0].text.contains("Settings"))
+        m.onEvent(event("assistant/chunk", """{"turn":2,"step":1,"chunk":{"type":"finish","reason":{"kind":"error","failure":{"message":"no API key for provider route","code":"NO_KEY"}}}}"""))
+        assertEquals(1, m.state().rows.filterIsInstance<NoticeRow>().count { it.kind == NoticeKind.API_KEY_MISSING })
+    }
+
+    @Test
+    fun `no api key turn end appends guidance`() {
+        val m = ChatTranscriptModel()
+        m.onEvent(event("turn/end", """{"turn":1,"reason":{"kind":"error","error":{"message":"llm-deepseek: no API key for provider route","code":"NO_KEY"}}}"""))
+        assertTrue(m.state().rows.any { it is NoticeRow && it.kind == NoticeKind.API_KEY_MISSING })
+    }
+
+    @Test
+    fun `other failures do not append key guidance`() {
+        val m = ChatTranscriptModel()
+        m.onEvent(event("assistant/chunk", """{"turn":1,"step":1,"chunk":{"type":"finish","reason":{"kind":"error","failure":{"message":"timeout","code":"TIMEOUT"}}}}"""))
+        assertTrue(m.state().rows.none { it is NoticeRow && it.kind == NoticeKind.API_KEY_MISSING })
+    }
 }

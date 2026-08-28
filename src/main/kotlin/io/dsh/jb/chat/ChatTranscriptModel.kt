@@ -83,6 +83,7 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
     private val listeners = CopyOnWriteArrayList<(TranscriptState) -> Unit>()
 
     private var streamingAssistantId: String? = null
+    private var noKeyGuidanceShown = false
     private var echoSeq = 0L
     private var streamSeq = 0L
     private var noticeSeq = 0L
@@ -104,6 +105,7 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
         planMode = false
         running = false
         streamingAssistantId = null
+        noKeyGuidanceShown = false
         pendingEchos.clear()
         publishLocked()
     }
@@ -174,6 +176,7 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
                                 kind = NoticeKind.NOTICE,
                                 text = "Assistant stream failed: ${failure.message} (${failure.code})",
                             )
+                            maybeAppendNoKeyGuidance(failure.message)
                         }
                     }
                     else -> Unit // block-start / block-end / tool-call-delta / raw: no row effect
@@ -230,11 +233,14 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
                 closeStreaming()
                 rows += NoticeRow("notice-${++noticeSeq}", NoticeKind.TURN_START, "Turn ${data.turn} started")
             }
-            is TurnEndEvent -> rows += NoticeRow(
-                "notice-${++noticeSeq}",
-                NoticeKind.TURN_END,
-                "Turn ${data.turn} ended — ${renderTurnEndReason(data.reason)}",
-            )
+            is TurnEndEvent -> {
+                rows += NoticeRow(
+                    "notice-${++noticeSeq}",
+                    NoticeKind.TURN_END,
+                    "Turn ${data.turn} ended — ${renderTurnEndReason(data.reason)}",
+                )
+                (data.reason as? ErrorEnd)?.error?.let { maybeAppendNoKeyGuidance(it.message) }
+            }
             is StepStartEvent -> rows += NoticeRow(
                 "notice-${++noticeSeq}",
                 NoticeKind.STEP,
@@ -289,6 +295,18 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
         streamingAssistantId = null
     }
 
+    /** One-shot actionable guidance after a no-API-key failure (roadmap item 10 ask-flow). */
+    private fun maybeAppendNoKeyGuidance(message: String) {
+        if (noKeyGuidanceShown || !isNoKeyFailure(message)) return
+        noKeyGuidanceShown = true
+        rows += NoticeRow(
+            id = "notice-${++noticeSeq}",
+            kind = NoticeKind.API_KEY_MISSING,
+            text = "Enter your API key in Settings → Tools → DeepSeek Harness, " +
+                "or put DEEPSEEK_API_KEY in the checkout's .env",
+        )
+    }
+
     private fun replaceRow(id: String, transform: (AssistantRow) -> AssistantRow) {
         val idx = rows.indexOfFirst { it.id == id }
         if (idx >= 0) rows[idx] = transform(rows[idx] as AssistantRow)
@@ -300,6 +318,10 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
         listeners.forEach { it(snapshot) }
     }
 }
+
+/** Whether a failure message means the DeepSeek API key is missing. */
+fun isNoKeyFailure(message: String): Boolean =
+    message.lowercase().contains("no api key")
 
 /** Renders message content blocks to plain text (item 5 renders no markdown). */
 fun renderContentBlocks(blocks: List<ContentBlock>): String =

@@ -37,6 +37,8 @@ data class DshSettingsSnapshot(
     val model: String = "deepseek-v4-flash",
     /** Reasoning effort wire id (off/low/high/max); owned by the composer Model tab. */
     val effort: String = "max",
+    /** Sandbox permission mode (workspace-write | danger-full-access); item 9, default workspace-write. */
+    val permissionMode: String = "workspace-write",
 )
 
 /**
@@ -77,9 +79,10 @@ class DshSettingsState : PersistentStateComponent<DshSettingsState> {
     var baseUrl: String = ""
     var model: String = "deepseek-v4-flash"
     var effort: String = "max"
+    var permissionMode: String = "workspace-write"
 
     fun snapshot(): DshSettingsSnapshot =
-        DshSettingsSnapshot(mode, bundledExe, checkoutPath, baseUrl, model, effort)
+        DshSettingsSnapshot(mode, bundledExe, checkoutPath, baseUrl, model, effort, permissionMode)
 
     override fun getState(): DshSettingsState = this
 
@@ -111,6 +114,11 @@ class DshSettingsConfigurable : Configurable {
     private val nodeStatus = JBLabel("Node.js: checking…").apply { foreground = JBColor.GRAY }
     private val baseUrl = JBTextField()
     private val model = JBTextField()
+    private val permissionMode = JComboBox(arrayOf("workspace-write", "danger-full-access"))
+    private val permissionHint = JBLabel(
+        "<html>workspace-write: writes and shell commands outside the project ask for approval first (item 9).<br>" +
+            "danger-full-access: no approvals — the agent can modify anything.",
+    ).apply { foreground = JBColor.GRAY }
     private val apiKey = JPasswordField()
     private val keyHint = JBLabel("Leave blank in checkout mode to use the checkout's own .env").apply {
         foreground = JBColor.GRAY
@@ -161,7 +169,9 @@ class DshSettingsConfigurable : Configurable {
         addRow(6, "API key (stored in the OS keychain):", apiKey)
         addRow(7, "", keyHint)
         addRow(8, "", clearKey)
-        addRow(9, "", nodeStatus)
+        addRow(9, "Permission mode:", permissionMode)
+        addRow(10, "", permissionHint)
+        addRow(11, "", nodeStatus)
         refreshNodeStatus()
         return panel
     }
@@ -187,6 +197,7 @@ class DshSettingsConfigurable : Configurable {
             bundledExe.text.trim() != s.bundledExe ||
             baseUrl.text.trim() != s.baseUrl ||
             model.text.trim() != s.model ||
+            permissionMode.selectedItem as? String != s.permissionMode ||
             apiKey.password.isNotEmpty()
     }
 
@@ -197,6 +208,7 @@ class DshSettingsConfigurable : Configurable {
         s.bundledExe = bundledExe.text.trim()
         s.baseUrl = baseUrl.text.trim()
         s.model = model.text.trim().ifBlank { "deepseek-chat" }
+        s.permissionMode = permissionMode.selectedItem as? String ?: "workspace-write"
         if (clearRequested) {
             DshApiKey.clear()
         } else {
@@ -213,6 +225,7 @@ class DshSettingsConfigurable : Configurable {
         bundledExe.text = s.bundledExe
         baseUrl.text = s.baseUrl
         model.text = s.model
+        permissionMode.selectedItem = s.permissionMode
         apiKey.text = ""
         clearRequested = false
     }

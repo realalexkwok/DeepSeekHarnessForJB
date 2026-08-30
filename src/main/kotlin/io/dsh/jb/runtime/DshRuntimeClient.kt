@@ -50,8 +50,8 @@ data class DshRuntimeConfig(
     val reasoningEffort: String = "max",
     /** Explicit harness home (`DSH_HOME`) required by the built-in `sdk` profile. */
     val harnessHome: String = "${System.getProperty("user.home")}/.dsh",
-    /** Permission mode until roadmap item 8 wires real dialogs. */
-    val permissionMode: String = "danger-full-access",
+    /** Sandbox permission mode; workspace-write asks before out-of-workspace effects (item 9). */
+    val permissionMode: String = "workspace-write",
     /** Agent workspace (becomes `initialize.cwd`); default: current dir. */
     val cwd: String = System.getProperty("user.dir"),
     /** Localhost bridge the runtime-side jb-bridge plugin calls (item 8). */
@@ -101,6 +101,7 @@ data class DshRuntimeConfig(
             apiKey = apiKey ?: "",
             baseUrl = settings.baseUrl.trim(),
             model = settings.model.trim().ifBlank { io.dsh.jb.settings.ModelCatalog.DEFAULT_MODEL },
+            permissionMode = settings.permissionMode.ifBlank { "workspace-write" },
             cwd = cwd,
             sessionId = sessionId,
         )

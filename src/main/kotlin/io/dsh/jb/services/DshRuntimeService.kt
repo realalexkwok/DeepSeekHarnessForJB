@@ -104,7 +104,7 @@ class DshRuntimeService(private val project: Project) : Disposable {
         // Item 8: a fresh bridge (random port + token) answers this runtime's
         // plan reviews and relays plan-mode commands.
         closeBridge()
-        val newBridge = io.dsh.jb.bridge.BridgeServer(onQuestions = ::answerPlanQuestions).also { it.start() }
+        val newBridge = io.dsh.jb.bridge.BridgeServer(onQuestions = ::answerQuestions, onApproval = ::answerApproval).also { it.start() }
         val cfg = provisional.copy(
             reasoningEffort = key.effort.wire,
             bridgeUrl = newBridge.url,
@@ -128,21 +128,33 @@ class DshRuntimeService(private val project: Project) : Disposable {
     }
 
     /**
-     * Item 8: shows the plan-review dialog for each forwarded question and maps
-     * the decision to the harness answer shape. A dismissed dialog fails safe
-     * to "keep planning" (the runtime answerer falls through otherwise, which
-     * plan-mode reports as an unavailable channel).
+     * Item 8 + 9: routes each forwarded question to its dialog — plan reviews
+     * keep the plan dialog, every other intent (generic ask_user_question) gets
+     * the generic [io.dsh.jb.ui.QuestionDialog]. A dismissed dialog fails safe
+     * to "keep planning" for plan reviews and an empty answer otherwise (the
+     * runtime answerer falls through, which the harness reports as unavailable).
      */
-    private fun answerPlanQuestions(questions: List<io.dsh.jb.bridge.PlanQuestion>): List<io.dsh.jb.bridge.PlanAnswer> =
+    private fun answerQuestions(questions: List<io.dsh.jb.bridge.PlanQuestion>): List<io.dsh.jb.bridge.PlanAnswer> =
         questions.map { question ->
-            val answer = io.dsh.jb.ui.PlanReviewDialog.ask(question)
+            val answer = if (question.intentKind == "plan-review") {
+                io.dsh.jb.ui.PlanReviewDialog.ask(question)
+            } else {
+                io.dsh.jb.ui.QuestionDialog.ask(question)
+            }
             if (answer != null) {
                 answer
             } else {
-                val keep = question.options.firstOrNull { it != question.approveLabel }.orEmpty()
-                io.dsh.jb.bridge.PlanAnswer(question.id, listOf(keep), null)
+                val fallback = question.options.firstOrNull { it != question.approveLabel }.orEmpty()
+                io.dsh.jb.bridge.PlanAnswer(question.id, listOf(fallback), null)
             }
         }
+
+    /**
+     * Item 9: decides one forwarded approval through the permission dialog.
+     * Dismissal fails closed to \`rejected\` (the harness's only safe default).
+     */
+    private fun answerApproval(approval: io.dsh.jb.bridge.BridgeApproval): String? =
+        io.dsh.jb.ui.PermissionDialog.ask(approval) ?: "rejected"
 
     /** Item 8: queues a command (e.g. `/plan`) for the runtime-side relay. */
     fun enqueueCommand(line: String) {

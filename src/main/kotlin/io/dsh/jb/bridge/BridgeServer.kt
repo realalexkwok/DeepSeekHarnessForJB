@@ -20,6 +20,8 @@ import java.util.concurrent.TimeUnit
  */
 class BridgeServer(
     private val onQuestions: (List<PlanQuestion>) -> List<PlanAnswer>,
+    /** Item 9: decides one forwarded `approval/request`; returns the outcome wire string, null fails closed. */
+    private val onApproval: (BridgeApproval) -> String? = { null },
     private val answerTimeoutMs: Long = 120_000,
 ) : AutoCloseable {
 
@@ -72,6 +74,49 @@ class BridgeServer(
                 return@createContext
             }
             val payload = BridgeProtocol.answersToJson(answers, mapper).toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, payload.size.toLong())
+            exchange.responseBody.use { it.write(payload) }
+            exchange.close()
+        }
+        server.createContext("/approval") { exchange ->
+            if (closed || !authorized(exchange)) {
+                exchange.sendResponseHeaders(401, -1)
+                exchange.close()
+                return@createContext
+            }
+            val body = try {
+                exchange.requestBody.readAllBytes().toString(Charsets.UTF_8)
+            } catch (_: Exception) {
+                ""
+            }
+            val root = try {
+                mapper.readTree(body)
+            } catch (_: Exception) {
+                mapper.nullNode()
+            }
+            val approval = BridgeProtocol.approvalFromJson(root)
+            if (approval == null) {
+                exchange.sendResponseHeaders(400, -1)
+                exchange.close()
+                return@createContext
+            }
+            // Block until the IDE decides; enforce the timeout fail-closed.
+            val future = pool.submit<String?>(java.util.concurrent.Callable { onApproval(approval) })
+            val outcome = try {
+                future.get(answerTimeoutMs, TimeUnit.MILLISECONDS)
+            } catch (_: Exception) {
+                future.cancel(true)
+                exchange.sendResponseHeaders(504, -1)
+                exchange.close()
+                return@createContext
+            }
+            if (outcome == null) {
+                exchange.sendResponseHeaders(504, -1)
+                exchange.close()
+                return@createContext
+            }
+            val payload = BridgeProtocol.approvalAnswerToJson(outcome, mapper).toByteArray(Charsets.UTF_8)
             exchange.responseHeaders.add("Content-Type", "application/json")
             exchange.sendResponseHeaders(200, payload.size.toLong())
             exchange.responseBody.use { it.write(payload) }

@@ -31,7 +31,10 @@ data class PromptContext(
 object PromptAssembly {
 
     private const val ASK_INSTRUCTION =
-        "This is a read-only request: answer without modifying any files or running state-changing commands."
+        "Confirm before changing anything: do not modify files or run state-changing commands yet. " +
+            "For changes INSIDE the session workspace, call the ask_user_question tool ONCE with a concise question and options so the user can approve or decline. " +
+            "For changes OUTSIDE the workspace, do NOT ask first — attempt the change directly; the sandbox denies the first attempt, and the permission prompt that follows IS the user's confirmation, so retry exactly once with sandbox_permissions and a one-sentence justification. " +
+            "Never double-ask: one dialog per change. If the user approves, proceed. Do not dump full prospective file contents into the chat."
 
     private const val PLAN_INSTRUCTION =
         "Before making any changes, research the request and present a plan for approval."

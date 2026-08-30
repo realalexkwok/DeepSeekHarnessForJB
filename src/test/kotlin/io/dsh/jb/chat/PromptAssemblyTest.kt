@@ -18,13 +18,14 @@ class PromptAssemblyTest {
     }
 
     @Test
-    fun `ask appends the read-only instruction`() {
+    fun `ask appends the confirm-first question-tool instruction`() {
         val text = PromptAssembly.assemble(
             "what does this do?",
             PromptContext(ComposerAction.ASK, includeCurrentFile = false, includeAgents = false),
         )
         assertTrue(text.startsWith("what does this do?"))
-        assertTrue(text.contains("read-only request"))
+        assertTrue(text.contains("ask_user_question"))
+        assertTrue(text.contains("Confirm before changing anything"))
     }
 
     @Test

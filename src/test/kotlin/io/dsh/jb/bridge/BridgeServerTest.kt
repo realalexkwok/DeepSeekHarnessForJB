@@ -160,4 +160,87 @@ class BridgeServerTest {
         assertTrue(bridge.drainCommands().isEmpty())
         bridge.close()
     }
+    @Test
+    fun `approval endpoint forwards and returns the outcome`() {
+        val seen = java.util.Collections.synchronizedList(mutableListOf<BridgeApproval>())
+        val bridge = BridgeServer(
+            onQuestions = { emptyList() },
+            onApproval = { approval ->
+                seen += approval
+                "allowed-once"
+            },
+        )
+        bridge.start()
+        try {
+            val body = mapper.createObjectNode().apply {
+                put("toolName", "write")
+                put("callId", "call_9")
+                put("reason", "outside workspace")
+            }
+            val response = http.send(
+                HttpRequest.newBuilder(URI.create("${bridge.url}/approval"))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer ${bridge.token}")
+                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
+                    .build(),
+                HttpResponse.BodyHandlers.ofString(),
+            )
+            assertEquals(200, response.statusCode())
+            assertEquals("""{"outcome":"allowed-once"}""", response.body())
+            assertEquals(1, seen.size)
+            assertEquals("write", seen.single().toolName)
+            assertEquals("call_9", seen.single().callId)
+            assertEquals("outside workspace", seen.single().reason)
+        } finally {
+            bridge.close()
+        }
+    }
+
+    @Test
+    fun `approval endpoint rejects malformed payloads and fails closed`() {
+        val bridge = BridgeServer(onQuestions = { emptyList() }, onApproval = { null })
+        bridge.start()
+        try {
+            val bad = mapper.createObjectNode().put("toolName", "")
+            val response = http.send(
+                HttpRequest.newBuilder(URI.create("${bridge.url}/approval"))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer ${bridge.token}")
+                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(bad)))
+                    .build(),
+                HttpResponse.BodyHandlers.ofString(),
+            )
+            assertEquals(400, response.statusCode())
+            val ok = mapper.createObjectNode().put("toolName", "bash")
+            val response2 = http.send(
+                HttpRequest.newBuilder(URI.create("${bridge.url}/approval"))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer ${bridge.token}")
+                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(ok)))
+                    .build(),
+                HttpResponse.BodyHandlers.ofString(),
+            )
+            assertEquals(504, response2.statusCode())
+        } finally {
+            bridge.close()
+        }
+    }
+
+    @Test
+    fun `question json parses intent kind and multiple`() {
+        val q = mapper.createObjectNode().apply {
+            put("id", "q1")
+            put("question", "pick")
+            put("multiple", true)
+            set<com.fasterxml.jackson.databind.JsonNode>("intent", mapper.createObjectNode().apply {
+                put("kind", "generic")
+                put("approve", "Yes")
+            })
+        }
+        val parsed = BridgeProtocol.questionFromJson(q)
+        assertEquals("generic", parsed.intentKind)
+        assertTrue(parsed.multiple)
+        assertEquals("Yes", parsed.approveLabel)
+    }
 }
+

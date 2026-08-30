@@ -371,4 +371,244 @@ class DshRuntimeE2eTest {
             FsTree.deleteNoFollow(root)
         }
     }
+
+    /**
+     * Roadmap item 9: under workspace-write, an out-of-workspace write escalates
+     * to an approval; the runtime-side answerer forwards it to the IDE bridge,
+     * the bridge decides REJECTED, the tool call fails, and nothing touches disk.
+     */
+    @Test
+    fun `permission approval flows through the bridge and rejects`() = runBlocking {
+        val bin = File(checkout, "apps/cli/lib/bin.js")
+        if (!bin.isFile) {
+            throw IllegalStateException("DSH dev checkout has no built CLI at $bin (expected the dsh-v0.1.2-alpha.1 layout)")
+        }
+        val probePath = "/etc/dsh-jb-e2e-probe-" + System.currentTimeMillis() + ".txt"
+        val requestCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val modelServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        modelServer.createContext("/") { exchange ->
+            val n = requestCount.incrementAndGet()
+            val headers = exchange.responseHeaders
+            headers.add("Content-Type", "text/event-stream")
+            headers.add("Connection", "close")
+            exchange.sendResponseHeaders(200, 0)
+            val out = exchange.responseBody
+            fun sse(data: String) {
+                out.write("data: $data\n\n".toByteArray(Charsets.UTF_8))
+            }
+            when (n) {
+                1 -> {
+                    // Plain out-of-workspace write: the fence denies it and hints
+                    // the sandbox_permissions retry.
+                    sse("""{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_w","type":"function","function":{"name":"write","arguments":""}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"$probePath\",\"content\":\"probe\"}"}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"content":""},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}""")
+                }
+                2 -> {
+                    // The model retries with sandbox_permissions + justification;
+                    // that escalation is what reaches the approval channel.
+                    sse("""{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_e","type":"function","function":{"name":"write","arguments":""}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"$probePath\",\"content\":\"probe\",\"sandbox_permissions\":\"danger-full-access\",\"justification\":\"The e2e test requires writing outside the workspace\"}"}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"content":""},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}""")
+                }
+                else -> {
+                    sse("""{"choices":[{"delta":{"role":"assistant","content":null}}]}""")
+                    sse("""{"choices":[{"delta":{"content":"done"}}]}""")
+                    sse("""{"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}""")
+                }
+            }
+            out.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
+            out.close()
+            exchange.close()
+        }
+        modelServer.start()
+        val port = (modelServer.address as InetSocketAddress).port
+        val root = createTempDirectory("dsh-jb-e2e-perm").toFile()
+        val stderrLines = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+        val forwardedApprovals = java.util.Collections.synchronizedList(mutableListOf<io.dsh.jb.bridge.BridgeApproval>())
+        val bridge = io.dsh.jb.bridge.BridgeServer(
+            onQuestions = { qs -> qs.map { q -> io.dsh.jb.bridge.PlanAnswer(q.id, listOf(q.options.firstOrNull().orEmpty()), null) } },
+            onApproval = { approval ->
+                forwardedApprovals += approval
+                "rejected"
+            },
+        )
+        bridge.start()
+
+        val client = DshRuntimeClient(
+            DshRuntimeConfig(
+                mode = "node",
+                checkoutPath = checkout,
+                apiKey = "keyless-e2e-no-call",
+                baseUrl = "http://127.0.0.1:$port",
+                provider = "deepseek-official",
+                model = "deepseek-v4-pro",
+                reasoningEffort = "max",
+                harnessHome = File(root, ".dsh").path,
+                permissionMode = "workspace-write",
+                cwd = root.path,
+                bridgeUrl = bridge.url,
+                bridgeToken = bridge.token,
+                sessionId = "e2e-perm",
+            ),
+            stderrSink = { stderrLines += it },
+        )
+        try {
+            val events = CopyOnWriteArrayList<SessionEventNotification>()
+            val statuses = CopyOnWriteArrayList<SessionStatusNotification>()
+            client.addEventListener(events::add)
+            client.addStatusListener(statuses::add)
+
+            client.start()
+            client.prompt("write outside the workspace")
+
+            withTimeout(90_000) {
+                while (!(events.any { it.event.type == "approval/decided" } && statuses.lastOrNull()?.isIdle == true)) {
+                    delay(100)
+                }
+            }
+            assertTrue("expected approval/asked", events.any { it.event.type == "approval/asked" })
+            val decided = events.filter { it.event.type == "approval/decided" }
+            assertTrue(
+                "expected a rejected outcome; got: " + decided.map { it.event.data.toString() },
+                decided.any { it.event.data.path("outcome").asText() == "rejected" },
+            )
+            assertTrue(
+                "approval should reach the IDE bridge",
+                forwardedApprovals.isNotEmpty(),
+            )
+            assertTrue(
+                "bridge should name a tool",
+                forwardedApprovals.any { it.toolName.isNotBlank() },
+            )
+            assertTrue("probe file must not exist after rejection", !File(probePath).exists())
+            client.shutdown()
+        } catch (t: Throwable) {
+            System.err.println("--- DSH runtime stderr (last 40 lines) ---")
+            stderrLines.toList().takeLast(40).forEach(System.err::println)
+            throw t
+        } finally {
+            client.close()
+            bridge.close()
+            modelServer.stop(0)
+            // Symlink-safe: DSH_HOME (root/.dsh) contains profile-fallback
+            // symlinks into the checkout; deleteRecursively() would follow them.
+            FsTree.deleteNoFollow(root)
+            File(probePath).delete()
+        }
+    }
+
+    /**
+     * Roadmap item 9 fix round: the built-in sdk profile does not compose the
+     * model-facing ask_user_question tool, so the jb-bridge plugin registers it.
+     * This proves the full loop: the mock model calls the tool, the question
+     * reaches the IDE bridge, the answer lands in the tool result, and the turn
+     * continues with the model's next message.
+     */
+    @Test
+    fun `ask_user_question tool forwards to the bridge`() = runBlocking {
+        val bin = File(checkout, "apps/cli/lib/bin.js")
+        if (!bin.isFile) {
+            throw IllegalStateException("DSH dev checkout has no built CLI at $bin (expected the dsh-v0.1.2-alpha.1 layout)")
+        }
+        val requestCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val modelServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        modelServer.createContext("/") { exchange ->
+            val n = requestCount.incrementAndGet()
+            val headers = exchange.responseHeaders
+            headers.add("Content-Type", "text/event-stream")
+            headers.add("Connection", "close")
+            exchange.sendResponseHeaders(200, 0)
+            val out = exchange.responseBody
+            fun sse(data: String) {
+                out.write("data: $data\n\n".toByteArray(Charsets.UTF_8))
+            }
+            when (n) {
+                1 -> {
+                    sse("""{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_q","type":"function","function":{"name":"ask_user_question","arguments":""}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"questions\":[{\"id\":\"q1\",\"question\":\"Write the file?\",\"header\":\"Confirm\",\"options\":[{\"label\":\"Yes, write it\"},{\"label\":\"No\"}]}]}"}}]}}]}""")
+                    sse("""{"choices":[{"delta":{"content":""},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}""")
+                }
+                else -> {
+                    sse("""{"choices":[{"delta":{"role":"assistant","content":null}}]}""")
+                    sse("""{"choices":[{"delta":{"content":"done"}}]}""")
+                    sse("""{"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}""")
+                }
+            }
+            out.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
+            out.close()
+            exchange.close()
+        }
+        modelServer.start()
+        val port = (modelServer.address as InetSocketAddress).port
+        val root = createTempDirectory("dsh-jb-e2e-ask").toFile()
+        val stderrLines = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+        val forwarded = java.util.Collections.synchronizedList(mutableListOf<io.dsh.jb.bridge.PlanQuestion>())
+        val bridge = io.dsh.jb.bridge.BridgeServer(
+            onQuestions = { qs ->
+                forwarded += qs
+                qs.map { q -> io.dsh.jb.bridge.PlanAnswer(q.id, listOf(q.options.firstOrNull().orEmpty()), null) }
+            },
+        )
+        bridge.start()
+
+        val client = DshRuntimeClient(
+            DshRuntimeConfig(
+                mode = "node",
+                checkoutPath = checkout,
+                apiKey = "keyless-e2e-no-call",
+                baseUrl = "http://127.0.0.1:$port",
+                provider = "deepseek-official",
+                model = "deepseek-v4-pro",
+                reasoningEffort = "max",
+                harnessHome = File(root, ".dsh").path,
+                permissionMode = "workspace-write",
+                cwd = root.path,
+                bridgeUrl = bridge.url,
+                bridgeToken = bridge.token,
+                sessionId = "e2e-ask",
+            ),
+            stderrSink = { stderrLines += it },
+        )
+        try {
+            val events = CopyOnWriteArrayList<SessionEventNotification>()
+            val statuses = CopyOnWriteArrayList<SessionStatusNotification>()
+            client.addEventListener(events::add)
+            client.addStatusListener(statuses::add)
+
+            client.start()
+            client.prompt("confirm before writing")
+
+            withTimeout(90_000) {
+                while (!(events.any { it.event.type == "assistant/message" && it.event.data.toString().contains("done") } &&
+                        statuses.lastOrNull()?.isIdle == true)
+                ) {
+                    delay(100)
+                }
+            }
+            assertTrue(
+                "the ask_user_question tool must reach the IDE bridge; stderr tail: " +
+                    stderrLines.toList().takeLast(10),
+                forwarded.any { it.id == "q1" && it.question.contains("Write the file") },
+            )
+            assertTrue(
+                "expected a tool result carrying the answers",
+                events.any { it.event.type == "tool/result" && it.event.data.toString().contains("q1") },
+            )
+            client.shutdown()
+        } catch (t: Throwable) {
+            System.err.println("--- DSH runtime stderr (last 40 lines) ---")
+            stderrLines.toList().takeLast(40).forEach(System.err::println)
+            throw t
+        } finally {
+            client.close()
+            bridge.close()
+            modelServer.stop(0)
+            // Symlink-safe: DSH_HOME (root/.dsh) contains profile-fallback
+            // symlinks into the checkout; deleteRecursively() would follow them.
+            FsTree.deleteNoFollow(root)
+        }
+    }
 }

@@ -247,6 +247,14 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val service = DshRuntimeService.getInstance(project)
         service.addEventListener(model::onEvent)
         service.addStatusListener(model::onStatus)
+        // Roadmap item 11 remainder: editor context actions preload the composer.
+        project.getService(ComposerRequests::class.java).addListener { action, text ->
+            ApplicationManager.getApplication().invokeLater {
+                actionSelected(action)
+                input.text = text
+                input.requestFocusInWindow()
+            }
+        }
 
         val s = DshSettingsState.getInstance().snapshot()
         effortItems[EffortLevel.fromWire(s.effort)]?.isSelected = true
@@ -278,8 +286,6 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             actionGroup.add(item)
             actionMenu.add(item)
         }
-        fixItem.isEnabled = false
-        fixItem.toolTipText = "Pending — semantics vs Execute not settled yet"
         askItem.addActionListener { actionSelected(ComposerAction.ASK) }
         executeItem.addActionListener { actionSelected(ComposerAction.EXECUTE) }
         planItem.addActionListener { actionSelected(ComposerAction.PLAN) }

@@ -29,6 +29,16 @@ class PromptAssemblyTest {
     }
 
     @Test
+    fun `fix appends the repair instruction`() {
+        val text = PromptAssembly.assemble(
+            "this is broken",
+            PromptContext(ComposerAction.FIX, includeCurrentFile = false, includeAgents = false),
+        )
+        assertTrue(text.startsWith("this is broken"))
+        assertTrue(text.contains("Diagnose and repair"))
+    }
+
+    @Test
     fun `plan appends the plan-first instruction`() {
         val text = PromptAssembly.assemble(
             "refactor it",

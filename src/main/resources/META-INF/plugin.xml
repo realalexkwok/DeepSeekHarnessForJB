@@ -23,4 +23,20 @@
                 displayName="DeepSeek Harness"
                 instance="io.dsh.jb.settings.DshSettingsConfigurable"/>
     </extensions>
+
+    <actions>
+        <!-- Roadmap item 11 remainder: editor-popup context actions on a selection. -->
+        <group id="io.dsh.jb.EditorSelectionGroup" text="DeepSeek Harness" popup="true">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <action id="io.dsh.jb.AskSelection"
+                    class="io.dsh.jb.ui.AskSelectionAction"
+                    text="DSH: Ask about Selection"/>
+            <action id="io.dsh.jb.ExplainSelection"
+                    class="io.dsh.jb.ui.ExplainSelectionAction"
+                    text="DSH: Explain Selection"/>
+            <action id="io.dsh.jb.FixSelection"
+                    class="io.dsh.jb.ui.FixSelectionAction"
+                    text="DSH: Fix Selection"/>
+        </group>
+    </actions>
 </idea-plugin>

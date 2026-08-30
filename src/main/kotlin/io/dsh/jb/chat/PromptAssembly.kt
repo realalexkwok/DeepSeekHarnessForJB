@@ -39,6 +39,9 @@ object PromptAssembly {
     private const val PLAN_INSTRUCTION =
         "Before making any changes, research the request and present a plan for approval."
 
+    private const val FIX_INSTRUCTION =
+        "Diagnose and repair the selected code: make the changes needed to fix its problems, then explain what you changed."
+
     fun assemble(userText: String, ctx: PromptContext): String {
         val sections = mutableListOf<String>()
         if (ctx.includeCurrentFile && !ctx.selection.isNullOrBlank()) {
@@ -53,7 +56,8 @@ object PromptAssembly {
         val instruction = when (ctx.action) {
             ComposerAction.ASK -> ASK_INSTRUCTION
             ComposerAction.PLAN -> PLAN_INSTRUCTION
-            ComposerAction.EXECUTE, ComposerAction.FIX -> null
+            ComposerAction.FIX -> FIX_INSTRUCTION
+            ComposerAction.EXECUTE -> null
         }
         return buildString {
             if (sections.isNotEmpty()) {

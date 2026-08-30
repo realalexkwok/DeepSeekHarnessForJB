@@ -1,0 +1,7 @@
+# jb-bridge patch over the built-in `sdk` profile.
+# The relative ./answerer.mjs name is anchored to THIS file's directory by the
+# harness loader — but only for rows inside an `insert:` group, so the row must
+# live under `insert:`.
+- insert:
+    - id: jb-bridge
+      name: ./answerer.mjs

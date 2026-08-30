@@ -45,6 +45,10 @@ class DshRuntimeService(private val project: Project) : Disposable {
     @Volatile
     private var started = false
 
+    /** Item 8: localhost bridge answering plan reviews and relaying commands. */
+    @Volatile
+    private var bridge: io.dsh.jb.bridge.BridgeServer? = null
+
     /** Rotated on every runtime start: per-runtime session ids avoid persisted-log collisions. */
     @Volatile
     private var runtimeNonce: String = newSessionNonce()
@@ -97,16 +101,57 @@ class DshRuntimeService(private val project: Project) : Disposable {
         )
         provisional.validateForStart()?.let { throw DshConfigException(it) }
         // Effort rides the initialize wire field against the built-in sdk profile.
-        val cfg = provisional.copy(reasoningEffort = key.effort.wire)
+        // Item 8: a fresh bridge (random port + token) answers this runtime's
+        // plan reviews and relays plan-mode commands.
+        closeBridge()
+        val newBridge = io.dsh.jb.bridge.BridgeServer(onQuestions = ::answerPlanQuestions).also { it.start() }
+        val cfg = provisional.copy(
+            reasoningEffort = key.effort.wire,
+            bridgeUrl = newBridge.url,
+            bridgeToken = newBridge.token,
+        )
         val c = DshRuntimeClient(cfg) { line -> logger.warn("[dsh-runtime] $line") }
-        eventListeners.forEach(c::addEventListener)
-        statusListeners.forEach(c::addStatusListener)
-        val result = c.start()
-        client = c
-        activeKey = key
-        initResult = result
-        started = true
-        return result
+        try {
+            eventListeners.forEach(c::addEventListener)
+            statusListeners.forEach(c::addStatusListener)
+            val result = c.start()
+            bridge = newBridge
+            client = c
+            activeKey = key
+            initResult = result
+            started = true
+            return result
+        } catch (e: Exception) {
+            newBridge.close()
+            throw e
+        }
+    }
+
+    /**
+     * Item 8: shows the plan-review dialog for each forwarded question and maps
+     * the decision to the harness answer shape. A dismissed dialog fails safe
+     * to "keep planning" (the runtime answerer falls through otherwise, which
+     * plan-mode reports as an unavailable channel).
+     */
+    private fun answerPlanQuestions(questions: List<io.dsh.jb.bridge.PlanQuestion>): List<io.dsh.jb.bridge.PlanAnswer> =
+        questions.map { question ->
+            val answer = io.dsh.jb.ui.PlanReviewDialog.ask(question)
+            if (answer != null) {
+                answer
+            } else {
+                val keep = question.options.firstOrNull { it != question.approveLabel }.orEmpty()
+                io.dsh.jb.bridge.PlanAnswer(question.id, listOf(keep), null)
+            }
+        }
+
+    /** Item 8: queues a command (e.g. `/plan`) for the runtime-side relay. */
+    fun enqueueCommand(line: String) {
+        bridge?.enqueueCommand(line)
+    }
+
+    private fun closeBridge() {
+        bridge?.close()
+        bridge = null
     }
 
     fun addEventListener(listener: (SessionEventNotification) -> Unit) {
@@ -131,6 +176,23 @@ class DshRuntimeService(private val project: Project) : Disposable {
         activeKey = null
         initResult = null
         started = false
+        closeBridge()
+    }
+
+    /**
+     * Kilo-style hard stop (Stop button): kills the runtime process tree
+     * (SIGTERM → grace → SIGKILL) instead of the graceful JSON-RPC shutdown,
+     * which can block while a turn is mid-tool-execution. The next prompt
+     * restarts the runtime lazily.
+     */
+    fun interrupt() {
+        val c = client ?: return
+        c.interrupt()
+        client = null
+        activeKey = null
+        initResult = null
+        started = false
+        closeBridge()
     }
 
     override fun dispose() {
@@ -139,6 +201,7 @@ class DshRuntimeService(private val project: Project) : Disposable {
         activeKey = null
         initResult = null
         started = false
+        closeBridge()
     }
 
     companion object {

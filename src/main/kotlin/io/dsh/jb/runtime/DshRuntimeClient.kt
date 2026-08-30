@@ -9,6 +9,7 @@ import io.dsh.jb.protocol.SessionEventNotification
 import io.dsh.jb.protocol.SessionPromptParams
 import io.dsh.jb.protocol.SessionPromptResult
 import io.dsh.jb.protocol.SessionStatusNotification
+import io.dsh.jb.util.FsTree
 import io.dsh.jb.protocol.StdioLineTransport
 import io.dsh.jb.protocol.textContentBlock
 import java.io.File
@@ -53,6 +54,10 @@ data class DshRuntimeConfig(
     val permissionMode: String = "danger-full-access",
     /** Agent workspace (becomes `initialize.cwd`); default: current dir. */
     val cwd: String = System.getProperty("user.dir"),
+    /** Localhost bridge the runtime-side jb-bridge plugin calls (item 8). */
+    val bridgeUrl: String = "",
+    /** Per-runtime bridge bearer token. */
+    val bridgeToken: String = "",
     /** Stable session id used for every prompt. */
     val sessionId: String,
     val maxTokens: Int? = null,
@@ -127,6 +132,10 @@ class DshRuntimeClient(
     @Volatile
     private var running = false
 
+    /** Per-runtime dir holding the staged jb-bridge patch + answerer. */
+    @Volatile
+    private var bridgeDir: File? = null
+
     fun addEventListener(listener: (SessionEventNotification) -> Unit) {
         eventListeners += listener
     }
@@ -139,7 +148,8 @@ class DshRuntimeClient(
 
     suspend fun start(): InitializeResult {
         check(!running) { "DSH runtime already running" }
-        val proc = ProcessBuilder(resolveCommand())
+        val stagedPatch = stageBridgePatch()
+        val proc = ProcessBuilder(resolveCommand(stagedPatch))
             .directory(processDirectory())
             .apply {
                 val env = environment()
@@ -149,6 +159,10 @@ class DshRuntimeClient(
                 env["DSH_HOME"] = config.harnessHome
                 env["DSH_PERMISSION_MODE"] = config.permissionMode
                 env["DSH_TELEMETRY_DISABLED"] = "1"
+                if (config.bridgeUrl.isNotBlank()) {
+                    env["DSH_JB_BRIDGE_URL"] = config.bridgeUrl
+                    env["DSH_JB_BRIDGE_TOKEN"] = config.bridgeToken
+                }
             }
             .start()
         process = proc
@@ -223,40 +237,124 @@ class DshRuntimeClient(
         peer = null
     }
 
+    /**
+     * Kilo-style hard stop (see kilocode's `killCliProcessTree`): SIGTERM to the
+     * whole process tree, a short grace period, then a RE-ENUMERATED SIGKILL
+     * escalation (a tool/shell can fork new descendants during the grace window).
+     * Blocks up to ~2×grace on the calling thread — call from an IO coroutine.
+     */
+    fun interrupt() {
+        val proc = process ?: return
+        killTree(proc, wait = true, graceSeconds = 3)
+    }
+
+    /** Kill the runtime process tree; [wait] false = fire SIGTERM+SIGKILL and return. */
+    private fun killTree(proc: Process, wait: Boolean, graceSeconds: Long) {
+        val first = proc.toHandle().descendants().toList().asReversed()
+        first.forEach { runCatching { it.destroy() } }
+        runCatching { proc.destroy() }
+        if (!wait) {
+            first.forEach { runCatching { it.destroyForcibly() } }
+            runCatching { proc.destroyForcibly() }
+            return
+        }
+        val parentExited = proc.waitFor(graceSeconds, TimeUnit.SECONDS)
+        val kids = (first + proc.toHandle().descendants().toList().asReversed()).distinctBy { it.pid() }
+        if (parentExited && kids.none { it.isAlive }) return
+        kids.forEach { runCatching { it.destroyForcibly() } }
+        runCatching { proc.destroyForcibly() }
+        proc.waitFor(graceSeconds, TimeUnit.SECONDS)
+    }
+
     override fun close() {
         running = false
         val proc = process
         process = null
         peer = null
-        proc?.destroyForcibly()
+        // Kilo-style tree kill (no wait — dispose paths must not block): the direct
+        // destroyForcibly() alone would orphan agent-spawned child processes.
+        proc?.let { killTree(it, wait = false, graceSeconds = 3) }
+        // Symlink-safe: never deleteRecursively() a tree that may contain
+        // the runtime's profile-fallback symlinks (they point INTO the checkout).
+        bridgeDir?.let { FsTree.deleteNoFollow(it) }
+        bridgeDir = null
         scope.cancel()
     }
 
-    private fun resolveCommand(): List<String> = when (config.mode) {
+    private fun resolveCommand(stagedPatch: File?): List<String> = when (config.mode) {
         "node" -> {
             val node = config.nodeExecutable ?: "node"
             val checkout = File(config.checkoutPath)
             require(checkout.isDirectory) { "DSH_CHECKOUT is not a directory: ${config.checkoutPath}" }
-            val builtBin = File(checkout, "node_modules/@deepseek-ai/dsh/lib/bin.js")
+            // Built entries first (self-contained bundles), then the dev source:
+            // 1. the installed @deepseek-ai/dsh package bin, 2. the source checkout's
+            // built CLI, 3. apps/cli/src/bin.ts through the checkout's tsx loader
+            // (absolute file path — the runtime's cwd is the WORKSPACE, so a bare
+            // tsx/esm import would not resolve there).
+            val installedBin = File(checkout, "node_modules/@deepseek-ai/dsh/lib/bin.js")
+            val builtCliBin = File(checkout, "apps/cli/lib/bin.js")
             val sourceBin = File(checkout, "apps/cli/src/bin.ts")
-            when {
-                builtBin.isFile -> listOf(node, builtBin.path, "--profile", "sdk")
-                // Development checkout: run the CLI source through the checkout's tsx loader.
-                sourceBin.isFile -> listOf(node, "--import", "tsx/esm", sourceBin.path, "--profile", "sdk")
-                else -> throw IllegalStateException("no dsh CLI bin under checkout: ${checkout.path}")
+            val tsxLoader = File(checkout, "node_modules/tsx/dist/esm/index.mjs")
+            val base = when {
+                installedBin.isFile -> listOf(node, installedBin.path)
+                builtCliBin.isFile -> listOf(node, builtCliBin.path)
+                sourceBin.isFile && tsxLoader.isFile ->
+                    listOf(node, "--import", tsxLoader.path, sourceBin.path)
+                else -> throw IllegalStateException(
+                    "no dsh CLI bin under checkout: ${checkout.path} " +
+                        "(expected node_modules/@deepseek-ai/dsh/lib/bin.js, apps/cli/lib/bin.js, " +
+                        "or apps/cli/src/bin.ts + tsx)",
+                )
             }
+            base + profileArgs(stagedPatch)
         }
         else -> {
             require(File(config.bundledExe).isFile) { "bundled runtime exe missing: ${config.bundledExe}" }
-            listOf(config.bundledExe, "--profile", "sdk")
+            listOf(config.bundledExe) + profileArgs(stagedPatch)
         }
     }
 
-    private fun processDirectory(): File = when (config.mode) {
-        // The node carrier resolves `tsx` and bare plugin specifiers from the checkout.
-        "node" -> File(config.checkoutPath)
-        else -> File(config.cwd)
+    /** `--profile sdk` plus the staged jb-bridge patch, when one exists. */
+    private fun profileArgs(stagedPatch: File?): List<String> =
+        buildList {
+            add("--profile")
+            add("sdk")
+            if (stagedPatch != null) {
+                add("--patch")
+                add(stagedPatch.path)
+            }
+        }
+
+    /**
+     * Extracts the bundled jb-bridge resources (answerer.mjs + cordis.patch.yml)
+     * into a per-runtime temp dir and returns the patch file. The patch row
+     * resolves `./answerer.mjs` relative to the patch file, so the two must stay
+     * together. Null when no bridge is configured.
+     */
+    private fun stageBridgePatch(): File? {
+        if (config.bridgeUrl.isBlank()) return null
+        val dir = kotlin.io.path.createTempDirectory("dsh-jb-bridge-").toFile()
+        val answerer = File(dir, "answerer.mjs")
+        val patch = File(dir, "cordis.patch.yml")
+        val answererOk = javaClass.getResourceAsStream("/jb-bridge/answerer.mjs")
+            ?.use { it.copyTo(answerer.outputStream()) } != null
+        val patchOk = javaClass.getResourceAsStream("/jb-bridge/cordis.patch.yml")
+            ?.use { it.copyTo(patch.outputStream()) } != null
+        if (!answererOk || !patchOk) {
+            dir.deleteRecursively()
+            return null
+        }
+        bridgeDir = dir
+        return patch
     }
+
+    /**
+     * The spawned runtime's working directory. ALWAYS the project workspace: the
+     * 0.1.2 `sdk` profile reads its sandbox root from `process.cwd()`, and a
+     * runtime whose cwd is the harness checkout can clean the checkout's own
+     * fixtures (the 2026-08-29 worker-outage incident — see the session rules).
+     */
+    private fun processDirectory(): File = File(config.cwd)
 
     private fun handleNotification(method: String, params: JsonNode) {
         when (method) {

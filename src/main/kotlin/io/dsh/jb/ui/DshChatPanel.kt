@@ -90,6 +90,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         foreground = JBColor(0xb26b00, 0xdfb14a)
         isVisible = false
     }
+    private val stopButton = JButton("Stop").apply {
+        isVisible = false
+        addActionListener { stopSession() }
+    }
     private val rowsPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
     private val scroll = JBScrollPane(rowsPanel).apply {
         border = null
@@ -127,6 +131,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     private val rowWidgets = LinkedHashMap<String, RowWidget>()
     private var wasAtBottom = true
+    private var lastMax = 0
     private var modelIds: List<String> = emptyList()
     private var populatingModels = false
     private var settingsOpenedForKey = false
@@ -175,7 +180,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val header = JPanel(BorderLayout())
         header.border = JBUI.Borders.empty(8, 12, 4, 12)
         header.add(statusLabel, BorderLayout.WEST)
-        header.add(planBadge, BorderLayout.EAST)
+        val headerRight = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply { isOpaque = false }
+        headerRight.add(stopButton)
+        headerRight.add(planBadge)
+        header.add(headerRight, BorderLayout.EAST)
         add(header, BorderLayout.NORTH)
 
         val bottom = JPanel(BorderLayout())
@@ -204,10 +212,33 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
         input.inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "dsh-send")
         input.actionMap.put("dsh-send", object : AbstractAction() {
-            override fun actionPerformed(e: ActionEvent) { send() }
+            override fun actionPerformed(e: ActionEvent) { submit() }
         })
-        sendIcon.addActionListener { send() }
-        scroll.verticalScrollBar.addAdjustmentListener { trackScroll() }
+        sendIcon.addActionListener { submit() }
+        // The scrollbar MODEL fires on EVERY value change — including mouse-wheel
+        // scrolls, which AdjustmentListener never sees (it only fires on thumb
+        // drags). Missing wheel events kept wasAtBottom=true after the user
+        // scrolled up, so streaming re-pinned the viewport to the bottom
+        // (manual-test failure 2026-08-30).
+        scroll.verticalScrollBar.model.addChangeListener { trackScroll() }
+        // Disengage auto-follow on SCROLL INTENT, not on accumulated position:
+        // a scroll-up gesture arrives as many small wheel frames, and each pin
+        // snaps the view back before the offset can pass any tolerance — so the
+        // position-based check can never trip and the pins win frame by frame
+        // (2026-08-30 re-test 3: scrollbar oscillation). Any upward wheel frame
+        // disengages immediately; scrolling back down to the bottom re-engages
+        // through trackScroll.
+        scroll.addMouseWheelListener { e ->
+            when {
+                e.wheelRotation < 0 -> wasAtBottom = false
+                e.wheelRotation > 0 -> SwingUtilities.invokeLater { trackScroll() }
+            }
+        }
+        // Thumb drags are also explicit user intent: disengage the moment a
+        // drag starts; the release position is re-evaluated by trackScroll.
+        scroll.verticalScrollBar.addAdjustmentListener { e ->
+            if (e.valueIsAdjusting) wasAtBottom = false
+        }
         rowsPanel.addComponentListener(object : ComponentAdapter() {
             override fun componentResized(e: ComponentEvent) { reflowAll() }
         })
@@ -377,16 +408,76 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val text = input.text.trim()
         if (text.isEmpty()) return
         input.text = ""
+        // Typed slash commands route through the bridge command relay — they
+        // must NOT reach the model as prompt text (2026-08-30 manual-test bug:
+        // a literal "/plan" prompt ran a real 10-minute agentic turn).
+        if (text == "/plan" || text == "/plan off") {
+            sendCommand(text)
+            return
+        }
+        // Item 8: the Plan action enters real plan mode via the bridge command
+        // relay (no-op when no runtime/bridge is live; the advisory instruction
+        // from PromptAssembly still applies either way).
+        if (currentAction == ComposerAction.PLAN) {
+            DshRuntimeService.getInstance(project).enqueueCommand("/plan")
+        }
         val assembled = PromptAssembly.assemble(text, gatherContext())
         model.echoPrompt(assembled)
         scope.launch {
+            val service = DshRuntimeService.getInstance(project)
             try {
-                DshRuntimeService.getInstance(project).prompt(assembled)
+                if (!service.isRunning()) startRuntime("")
+                service.prompt(assembled)
             } catch (e: Exception) {
                 logger.warn("prompt failed", e)
                 ApplicationManager.getApplication().invokeLater {
                     model.notice("Send failed: ${e.message ?: e.javaClass.simpleName}")
                 }
+            }
+        }
+    }
+
+    /** `/plan` and `/plan off`: relay to the harness and mirror the composer mode. */
+    private fun sendCommand(command: String) {
+        val entering = command == "/plan"
+        actionSelected(if (entering) ComposerAction.PLAN else ComposerAction.ASK)
+        scope.launch {
+            val service = DshRuntimeService.getInstance(project)
+            try {
+                if (!service.isRunning()) startRuntime("")
+                service.enqueueCommand(command)
+                ApplicationManager.getApplication().invokeLater {
+                    model.notice(if (entering) "Entering plan mode — the harness will plan before applying changes" else "Leaving plan mode")
+                }
+            } catch (e: Exception) {
+                logger.warn("command failed", e)
+                ApplicationManager.getApplication().invokeLater {
+                    model.notice("Command failed: ${e.message ?: e.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Kilo-style submit: the send button doubles as Stop while the agent runs
+     * (see kilocode's StopSessionAction + isStopEnabled toggle).
+     */
+    private fun submit() {
+        if (model.state().running) stopSession() else send()
+    }
+
+    /**
+     * Stops the running turn with a Kilo-style process-tree kill
+     * (SIGTERM → grace → SIGKILL); the next send restarts the runtime.
+     */
+    private fun stopSession() {
+        scope.launch {
+            DshRuntimeService.getInstance(project).interrupt()
+            ApplicationManager.getApplication().invokeLater {
+                model.onStatus(io.dsh.jb.protocol.SessionStatusNotification("", "idle"))
+                model.notice("Session stopped — send a new prompt to restart")
+                statusLabel.text = "DSH agent: idle"
+                render(model.state())
             }
         }
     }
@@ -418,6 +509,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             else -> "DSH agent: idle"
         }
         planBadge.isVisible = state.planMode
+        stopButton.isVisible = state.running
+        // The send button toggles to Stop while running (Kilo pattern).
+        sendIcon.icon = if (state.running) AllIcons.Actions.Suspend else AllIcons.Actions.Execute
+        sendIcon.toolTipText = if (state.running) "Stop" else "Send prompt"
+        // Mirror the harness plan mode onto the composer tab so typed /plan and
+        // bridge commands stay visually in sync (one-way: mode on → Plan).
+        if (state.planMode && currentAction != ComposerAction.PLAN) {
+            actionSelected(ComposerAction.PLAN)
+        }
 
         // One-shot proactive ask when the API key is missing (roadmap item 10).
         if (!settingsOpenedForKey &&
@@ -437,6 +537,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
         val seen = HashSet<String>()
         var changed = false
+        // Snapshot the follow state BEFORE any row mutation: reading it after
+        // reflowAll() picks up transient scrollbar states and force-pins the
+        // viewport to the bottom while the user scrolled up (2026-08-30).
+        val follow = wasAtBottom
         for (row in state.rows) {
             seen += row.id
             val widget = rowWidgets[row.id]
@@ -463,8 +567,16 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         renderTodos(state.todos)
         if (changed) {
             reflowAll()
-            if (wasAtBottom) {
-                SwingUtilities.invokeLater { scroll.verticalScrollBar.value = scroll.verticalScrollBar.maximum }
+            lastMax = scroll.verticalScrollBar.maximum
+            if (follow) {
+                // Re-verify AT EXECUTION TIME: if the user scrolled up in the
+                // meantime (even if the follow flag missed it), never pin.
+                SwingUtilities.invokeLater {
+                    val bar = scroll.verticalScrollBar
+                    if (bar.value + bar.model.extent >= bar.maximum - 24) {
+                        bar.value = bar.maximum
+                    }
+                }
             }
         }
     }
@@ -491,7 +603,14 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     private fun trackScroll() {
         val bar = scroll.verticalScrollBar
-        wasAtBottom = bar.value + bar.model.extent >= bar.maximum - 24
+        val atBottom = bar.value + bar.model.extent >= bar.maximum - 24
+        if (!atBottom) {
+            wasAtBottom = false
+        } else if (bar.maximum >= lastMax) {
+            // Re-engage follow only when the content actually grew: a shrinking
+            // layout clamps the value to the max and would fake "at bottom".
+            wasAtBottom = true
+        }
     }
 
     private fun createWidget(row: TranscriptRow): RowWidget = when (row) {

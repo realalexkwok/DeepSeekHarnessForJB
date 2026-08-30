@@ -14,6 +14,9 @@ High-level implementation order, one small phrase of work per item.
      every report names the built artifact's absolute path
      (`build/distributions/DeepSeekHarnessForJB-0.1.0.<stamp>.zip`)
 4. Work refers to specs/mission.md and specs/tech-stack.md for guidance.
+5. When the item is done and both verification halves pass, the user approves
+   merging the branch into main; the next item's branch is created FROM the
+   updated main (branches never stack on finished feature branches).
 
 ## Items
 1. Constitution: specs/mission.md, specs/tech-stack.md, specs/roadmap.md, AGENTS.md
@@ -22,6 +25,9 @@ High-level implementation order, one small phrase of work per item.
    initialize / session/prompt / shutdown
 4. Event model: map session.event vocabulary to Kotlin types
 5. Chat tool window: transcript, streaming text, tool cards, thinking disclosure
+   — follow-up (2026-08-30): rebuild the transcript around a list/table model;
+   the growing-panel approach cannot fix the streaming auto-scroll re-pin
+   (known limitation in specs/tech-stack.md; skip approved by user)
 6. Context picker: AGENTS.md / current file / rules — all selected by default
    — subset pulled forward 2026-08-27 (specs/2026-08-27-composer): Current file +
    AGENTS.md checkboxes in the composer; "workspace rules" remains for this item.

@@ -22,6 +22,9 @@ must be answered by the user.
   requirements, plan, validation.
 - Feature specs live in `specs/YYYY-MM-DD-feature-name/` with `requirements.md`,
   `plan.md`, `validation.md`.
+- Branching: when an item (or item group) is finished and verified, merge its
+  branch into `main` (on the user's approval) and create the NEXT item's branch
+  from the updated `main` — never stack a new branch on a finished feature branch.
 ### Verification
 - Every verification has TWO halves and BOTH are required before merge:
   1. Automatic — the agent runs `./gradlew test` and `./gradlew buildPlugin` and

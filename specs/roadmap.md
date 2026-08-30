@@ -49,3 +49,8 @@ High-level implementation order, one small phrase of work per item.
     (added 2026-08-27 per user request; implemented in roadmap order)
 15. Composer context attachments: collapsed compact view instead of inline full
     content (added 2026-08-27; deferred — replanned after all tasks per user)
+16. Settings simplification (grouped, added 2026-08-30): remove the Bundled
+    executable path input (embedded runtime only — the pinned harness version
+    is what matters while DSH is in active development); remove Base URL and
+    Model fields (Model is chosen in the composer); mask a stored API key so
+    the page shows it is set.

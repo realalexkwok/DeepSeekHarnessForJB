@@ -12,7 +12,6 @@ import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
-import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
 import com.intellij.util.xmlb.XmlSerializerUtil
 import io.dsh.jb.runtime.NodeResolver
@@ -98,30 +97,34 @@ class DshSettingsState : PersistentStateComponent<DshSettingsState> {
 }
 
 /**
- * The settings page: carrier toggle, checkout/bundled-exe path pickers, optional
- * base URL, model name, and the keychain-held API key.
+ * The settings page (simplified 2026-08-30, grouped item 16): carrier toggle,
+ * checkout path (node carrier), the embedded-runtime description (bundled
+ * carrier), permission mode, and the keychain-held API key (masked when set).
+ * Base URL and Model were removed — the model is chosen in the composer.
  */
 class DshSettingsConfigurable : Configurable {
 
     private val carrier = JComboBox(arrayOf("Node checkout", "Bundled executable"))
     private val checkoutPath = TextFieldWithBrowseButton()
-    private val bundledExe = TextFieldWithBrowseButton()
     private val bundledHint = JBLabel(
-        "<html>Leave blank to use the EMBEDDED packaged runtime (item 12) — extracted on first<br>" +
-            "start to ~/.deepseek-harness-for-jb/runtime beside its ripgrep sidecar.<br>" +
-            "Or pick an externally built single-file executable (upstream pkg/SEA pipeline).</html>",
+        "<html>Bundled executable: the plugin ships the embedded packaged runtime<br>" +
+            "(pinned to the harness version it was built against — no path needed); it is<br>" +
+            "extracted to ~/.deepseek-harness-for-jb/runtime on first start.</html>",
     ).apply { foreground = JBColor.GRAY }
     private val nodeStatus = JBLabel("Node.js: checking…").apply { foreground = JBColor.GRAY }
-    private val baseUrl = JBTextField()
-    private val model = JBTextField()
     private val permissionMode = JComboBox(arrayOf("workspace-write", "danger-full-access"))
     private val permissionHint = JBLabel(
         "<html>workspace-write: writes and shell commands outside the project ask for approval first (item 9).<br>" +
             "danger-full-access: no approvals — the agent can modify anything.",
     ).apply { foreground = JBColor.GRAY }
     private val apiKey = JPasswordField()
-    private val keyHint = JBLabel("Leave blank in checkout mode to use the checkout's own .env").apply {
+    private val keyHint = JBLabel("A masked value means a key is stored; leave it unchanged to keep the current key.").apply {
         foreground = JBColor.GRAY
+    }
+
+    companion object {
+        /** Shown when a key exists; typing over it replaces the stored key. */
+        private const val KEY_MASK = "********"
     }
     private val clearKey = JButton("Clear stored key")
     private var clearRequested = false
@@ -132,12 +135,6 @@ class DshSettingsConfigurable : Configurable {
             "Select the deepseek-harness checkout directory",
             null,
             FileChooserDescriptorFactory.createSingleFolderDescriptor(),
-        )
-        bundledExe.addBrowseFolderListener(
-            "DeepSeek Harness bundled runtime",
-            "Select the dsh-jsonrpc-agent-pkg executable",
-            null,
-            FileChooserDescriptorFactory.createSingleFileDescriptor(),
         )
         clearKey.addActionListener { clearRequested = true }
     }
@@ -162,16 +159,14 @@ class DshSettingsConfigurable : Configurable {
         }
         addRow(0, "Runtime carrier:", carrier)
         addRow(1, "Harness checkout (node):", checkoutPath)
-        addRow(2, "Bundled executable:", bundledExe)
-        addRow(3, "", bundledHint)
-        addRow(4, "Base URL (optional):", baseUrl)
-        addRow(5, "Model:", model)
-        addRow(6, "API key (stored in the OS keychain):", apiKey)
-        addRow(7, "", keyHint)
-        addRow(8, "", clearKey)
-        addRow(9, "Permission mode:", permissionMode)
-        addRow(10, "", permissionHint)
-        addRow(11, "", nodeStatus)
+        addRow(2, "", bundledHint)
+        addRow(3, "API key (stored in the OS keychain):", apiKey)
+        addRow(4, "", keyHint)
+        addRow(5, "", clearKey)
+        addRow(6, "Permission mode:", permissionMode)
+        addRow(7, "", permissionHint)
+        addRow(8, "", nodeStatus)
+        apiKey.text = if (DshApiKey.get().isNullOrBlank()) "" else KEY_MASK
         refreshNodeStatus()
         return panel
     }
@@ -191,29 +186,25 @@ class DshSettingsConfigurable : Configurable {
 
     override fun isModified(): Boolean {
         val s = DshSettingsState.getInstance().snapshot()
+        val entered = String(apiKey.password)
         return clearRequested ||
             modeFromUi() != s.mode ||
             checkoutPath.text.trim() != s.checkoutPath ||
-            bundledExe.text.trim() != s.bundledExe ||
-            baseUrl.text.trim() != s.baseUrl ||
-            model.text.trim() != s.model ||
             permissionMode.selectedItem as? String != s.permissionMode ||
-            apiKey.password.isNotEmpty()
+            (entered.isNotEmpty() && entered != KEY_MASK)
     }
 
     override fun apply() {
         val s = DshSettingsState.getInstance()
         s.mode = modeFromUi()
         s.checkoutPath = checkoutPath.text.trim()
-        s.bundledExe = bundledExe.text.trim()
-        s.baseUrl = baseUrl.text.trim()
-        s.model = model.text.trim().ifBlank { "deepseek-chat" }
         s.permissionMode = permissionMode.selectedItem as? String ?: "workspace-write"
         if (clearRequested) {
             DshApiKey.clear()
         } else {
             val entered = String(apiKey.password).trim()
-            if (entered.isNotEmpty()) DshApiKey.set(entered)
+            // The mask means "keep the current key" — only a real value replaces it.
+            if (entered.isNotEmpty() && entered != KEY_MASK) DshApiKey.set(entered)
         }
         clearRequested = false
     }
@@ -222,11 +213,8 @@ class DshSettingsConfigurable : Configurable {
         val s = DshSettingsState.getInstance().snapshot()
         carrier.selectedIndex = if (s.mode == "bundled") 1 else 0
         checkoutPath.text = s.checkoutPath
-        bundledExe.text = s.bundledExe
-        baseUrl.text = s.baseUrl
-        model.text = s.model
         permissionMode.selectedItem = s.permissionMode
-        apiKey.text = ""
+        apiKey.text = if (DshApiKey.get().isNullOrBlank()) "" else KEY_MASK
         clearRequested = false
     }
 

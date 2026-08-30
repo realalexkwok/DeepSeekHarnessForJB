@@ -4,6 +4,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.io.path.createTempFile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -45,9 +46,15 @@ class DshConfigValidationTest {
     }
 
     @Test
-    fun `bundled carrier with blank exe is reported`() {
+    fun `bundled carrier with blank exe auto-resolves the embedded runtime`() {
+        // Item 12: a blank bundledExe means the embedded runtime; on a supported
+        // platform validation passes (extraction happens at start).
         val cfg = DshRuntimeConfig(mode = "bundled", sessionId = "jb-4")
-        assertEquals("Bundled runtime executable path is not configured", cfg.validateForStart())
+        if (BundledRuntimeResolver.platformDir() != null) {
+            assertNull(cfg.validateForStart())
+        } else {
+            assertTrue(cfg.validateForStart()!!.contains("No embedded runtime"))
+        }
     }
 
     @Test

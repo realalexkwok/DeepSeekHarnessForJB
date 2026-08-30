@@ -1,0 +1,88 @@
+name: Build bundled runtime exes and platform plugin zips
+
+# Item 12 production build: builds the harness's packaged single-file SDK runtime
+# for each platform from the pinned harness tag (upstream pkg/SEA pipeline), stages
+# it into runtime-dist, and produces one self-contained plugin zip per platform.
+
+on:
+  workflow_dispatch:
+    inputs:
+      harness_ref:
+        description: 'Harness tag/commit to build (e.g. dsh-v0.1.2-alpha.1)'
+        required: false
+        default: 'dsh-v0.1.2-alpha.1'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: '${{ matrix.platform }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-latest
+            target: node24-linux-x64
+          - platform: macos-arm64
+            os: macos-14
+            target: node24-macos-arm64
+          - platform: win-x64
+            os: windows-2025
+            target: node24-win-x64
+    runs-on: '${{ matrix.os }}'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: '${{ inputs.harness_ref }}'
+          path: harness
+
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable Windows Developer Mode (symlink support)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /t REG_DWORD /f /v "AllowDevelopmentWithoutDevLicense" /d "1"
+
+      - name: Install harness dependencies
+        working-directory: harness
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the single-file runtime executable
+        working-directory: harness
+        env:
+          DSH_BUILD_CLIENT_PROFILE: official
+          DSH_TELEMETRY_DISABLED: '1'
+        run: pnpm exec tsx scripts/build-exe-for-python-sdk.ts --targets='${{ matrix.target }}'
+
+      - name: Stage the executable for the plugin build
+        shell: bash
+        run: |
+          mkdir -p plugin/runtime-dist/${{ matrix.platform }}
+          cp harness/dist-exe/* plugin/runtime-dist/${{ matrix.platform }}/
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build the self-contained platform plugin zip
+        working-directory: plugin
+        run: ./gradlew buildPlugin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeepSeekHarnessForJB-${{ matrix.platform }}
+          path: plugin/build/distributions/*.zip
+          if-no-files-found: error

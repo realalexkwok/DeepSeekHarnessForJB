@@ -107,9 +107,9 @@ class DshSettingsConfigurable : Configurable {
     private val checkoutPath = TextFieldWithBrowseButton()
     private val bundledExe = TextFieldWithBrowseButton()
     private val bundledHint = JBLabel(
-        "<html>Single-file executable built from the DeepSeek Harness repo — " +
-            "dsh-jsonrpc-agent-pkg-&lt;platform&gt;-&lt;arch&gt; (Node SEA binary).<br>" +
-            "Ships bundled with the plugin in roadmap item 12; leave blank until then.</html>",
+        "<html>Leave blank to use the EMBEDDED packaged runtime (item 12) — extracted on first<br>" +
+            "start to ~/.deepseek-harness-for-jb/runtime beside its ripgrep sidecar.<br>" +
+            "Or pick an externally built single-file executable (upstream pkg/SEA pipeline).</html>",
     ).apply { foreground = JBColor.GRAY }
     private val nodeStatus = JBLabel("Node.js: checking…").apply { foreground = JBColor.GRAY }
     private val baseUrl = JBTextField()

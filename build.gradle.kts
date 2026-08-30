@@ -64,6 +64,30 @@ intellijPlatform {
     }
 }
 
+
+// Item 12: embed locally built packaged runtimes (runtime-dist/<os>-<arch>/,
+// gitignored, produced by the upstream pkg/SEA pipeline) into the plugin
+// resources so the Bundled carrier is self-contained. The release workflow
+// stages exactly one platform per leg before invoking buildPlugin.
+val stageBundledRuntime = tasks.register("stageBundledRuntime") {
+    inputs.dir(file("runtime-dist")).optional()
+    outputs.dir(file("build/resources/main/runtime"))
+    doLast {
+        val src = file("runtime-dist")
+        val dst = file("build/resources/main/runtime")
+        if (src.exists()) {
+            dst.deleteRecursively()
+            src.copyRecursively(dst)
+        }
+    }
+}
+tasks.processResources {
+    dependsOn(stageBundledRuntime)
+}
+tasks.test {
+    dependsOn(stageBundledRuntime)
+}
+
 tasks.test {
     testLogging {
         events("started", "passed", "failed", "skipped")

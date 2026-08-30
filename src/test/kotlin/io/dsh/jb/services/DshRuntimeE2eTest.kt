@@ -19,6 +19,7 @@ import io.dsh.jb.events.TurnStartEvent
 import io.dsh.jb.events.UserMessageEvent
 import io.dsh.jb.protocol.SessionEventNotification
 import io.dsh.jb.protocol.SessionStatusNotification
+import io.dsh.jb.runtime.BundledRuntimeResolver
 import io.dsh.jb.runtime.DshRuntimeClient
 import io.dsh.jb.runtime.DshRuntimeConfig
 import io.dsh.jb.util.FsTree
@@ -609,6 +610,100 @@ class DshRuntimeE2eTest {
             // Symlink-safe: DSH_HOME (root/.dsh) contains profile-fallback
             // symlinks into the checkout; deleteRecursively() would follow them.
             FsTree.deleteNoFollow(root)
+        }
+    }
+
+    /**
+     * Roadmap item 12: the EMBEDDED packaged runtime serves the sdk profile.
+     * Skipped when no runtime-dist was staged into the test resources.
+     */
+    @Test
+    fun `bundled runtime exe initializes against the mock llm`() = runBlocking {
+        val cache = createTempDirectory("dsh-jb-bundled-cache").toFile()
+        System.setProperty("dsh.jb.runtimeCache", cache.path)
+        try {
+            val exe = BundledRuntimeResolver.resolve()
+            org.junit.Assume.assumeTrue(
+                "embedded runtime resource not staged (runtime-dist not populated)",
+                exe != null,
+            )
+            val exeFile = exe ?: return@runBlocking
+            val requestCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val modelServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+            modelServer.createContext("/") { exchange ->
+                requestCount.incrementAndGet()
+                val headers = exchange.responseHeaders
+                headers.add("Content-Type", "text/event-stream")
+                headers.add("Connection", "close")
+                exchange.sendResponseHeaders(200, 0)
+                val out = exchange.responseBody
+                fun sse(data: String) {
+                    out.write("data: $data\n\n".toByteArray(Charsets.UTF_8))
+                }
+                sse("""{"choices":[{"delta":{"role":"assistant","content":null}}]}""")
+                sse("""{"choices":[{"delta":{"content":"done"}}]}""")
+                sse("""{"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}""")
+                out.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
+                out.close()
+                exchange.close()
+            }
+            modelServer.start()
+            val port = (modelServer.address as InetSocketAddress).port
+            val root = createTempDirectory("dsh-jb-e2e-bundled").toFile()
+            val stderrLines = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+            val client = DshRuntimeClient(
+                DshRuntimeConfig(
+                    mode = "bundled",
+                    bundledExe = "",
+                    apiKey = "keyless-e2e-no-call",
+                    baseUrl = "http://127.0.0.1:$port",
+                    provider = "deepseek-official",
+                    model = "deepseek-v4-pro",
+                    reasoningEffort = "max",
+                    harnessHome = File(root, ".dsh").path,
+                    permissionMode = "danger-full-access",
+                    cwd = root.path,
+                    sessionId = "e2e-bundled",
+                ),
+                stderrSink = { stderrLines += it },
+            )
+            try {
+                val events = CopyOnWriteArrayList<SessionEventNotification>()
+                val statuses = CopyOnWriteArrayList<SessionStatusNotification>()
+                client.addEventListener(events::add)
+                client.addStatusListener(statuses::add)
+
+                val init = client.start()
+                assertEquals("deepseek-harness-sdk-runtime", init.serverInfo.name)
+                assertTrue(
+                    "expected the ripgrep sidecar beside the exe",
+                    exeFile.parentFile!!.listFiles()!!.any { it.name.endsWith("-rg") },
+                )
+                client.prompt("hello")
+                withTimeout(90_000) {
+                    while (!(events.any {
+                            it.event.type == "assistant/message" && it.event.data.toString().contains("done")
+                        } && statuses.lastOrNull()?.isIdle == true)
+                    ) {
+                        delay(100)
+                    }
+                }
+                client.shutdown()
+            } catch (t: Throwable) {
+                System.err.println("--- DSH runtime stderr (last 40 lines) ---")
+                stderrLines.toList().takeLast(40).forEach(System.err::println)
+                throw t
+            } finally {
+                client.close()
+                modelServer.stop(0)
+                // Symlink-safe: DSH_HOME (root/.dsh) contains profile-fallback
+                // symlinks into the checkout; deleteRecursively() would follow them.
+                FsTree.deleteNoFollow(root)
+            }
+        } finally {
+            System.clearProperty("dsh.jb.runtimeCache")
+            FsTree.deleteNoFollow(cache)
         }
     }
 }

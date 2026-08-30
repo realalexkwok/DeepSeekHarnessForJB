@@ -48,8 +48,12 @@ data class DshRuntimeConfig(
     val model: String = "deepseek-chat",
     /** Adapter-owned reasoning effort, sent at initialize (dsh-v0.1.2-alpha.1+). */
     val reasoningEffort: String = "max",
-    /** Explicit harness home (`DSH_HOME`) required by the built-in `sdk` profile. */
-    val harnessHome: String = "${System.getProperty("user.home")}/.dsh",
+    /**
+     * Explicit harness home (`DSH_HOME`) required by the built-in `sdk` profile.
+     * Isolated under ~/.deepseek-harness-for-jb (dsh-cline's isolation decision,
+     * item 12): the user's own ~/.dsh is never touched.
+     */
+    val harnessHome: String = "${System.getProperty("user.home")}/.deepseek-harness-for-jb/dsh",
     /** Sandbox permission mode; workspace-write asks before out-of-workspace effects (item 9). */
     val permissionMode: String = "workspace-write",
     /** Agent workspace (becomes `initialize.cwd`); default: current dir. */
@@ -68,9 +72,11 @@ data class DshRuntimeConfig(
      * proactive ask (notice + settings page), see DshChatPanel.
      */
     fun validateForStart(): String? = when {
-        mode == "bundled" && bundledExe.isBlank() ->
-            "Bundled runtime executable path is not configured"
-        mode == "bundled" && !File(bundledExe).isFile ->
+        mode == "bundled" && bundledExe.isBlank() && BundledRuntimeResolver.platformDir() == null ->
+            "No embedded runtime for this platform (" +
+                System.getProperty("os.name") + "/" + System.getProperty("os.arch") +
+                ") — provide a manual bundled executable path"
+        mode == "bundled" && bundledExe.isNotBlank() && !File(bundledExe).isFile ->
             "Bundled runtime executable not found: $bundledExe"
         mode == "node" && checkoutPath.isBlank() ->
             "DeepSeek Harness checkout path is not configured"
@@ -310,8 +316,17 @@ class DshRuntimeClient(
             base + profileArgs(stagedPatch)
         }
         else -> {
-            require(File(config.bundledExe).isFile) { "bundled runtime exe missing: ${config.bundledExe}" }
-            listOf(config.bundledExe) + profileArgs(stagedPatch)
+            // Item 12: a blank bundledExe means the embedded runtime — extract it
+            // (versioned, idempotent) beside its ripgrep sidecar.
+            val exe = if (config.bundledExe.isNotBlank()) {
+                File(config.bundledExe)
+            } else {
+                BundledRuntimeResolver.resolve() ?: throw IllegalStateException(
+                    "no embedded runtime for platform ${BundledRuntimeResolver.platformDir()}",
+                )
+            }
+            require(exe.isFile) { "bundled runtime exe missing: ${exe.path}" }
+            listOf(exe.path) + profileArgs(stagedPatch)
         }
     }
 

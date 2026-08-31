@@ -150,11 +150,21 @@ class DshRuntimeService(private val project: Project) : Disposable {
         }
 
     /**
-     * Item 9: decides one forwarded approval through the permission dialog.
-     * Dismissal fails closed to \`rejected\` (the harness's only safe default).
+     * Item 9 + 17c: decides one forwarded approval through the permission
+     * dialog. A FAIR lock serializes concurrent asks FIFO (Kilo's pending-queue
+     * semantics): the active dialog finishes before the next one opens.
+     * Dismissal fails closed to \`rejected\`.
      */
-    private fun answerApproval(approval: io.dsh.jb.bridge.BridgeApproval): String? =
-        io.dsh.jb.ui.PermissionDialog.ask(approval) ?: "rejected"
+    private val approvalLock = java.util.concurrent.locks.ReentrantLock(true)
+
+    private fun answerApproval(approval: io.dsh.jb.bridge.BridgeApproval): String? {
+        approvalLock.lock()
+        try {
+            return io.dsh.jb.ui.PermissionDialog.ask(approval) ?: "rejected"
+        } finally {
+            approvalLock.unlock()
+        }
+    }
 
     /** Item 8: queues a command (e.g. `/plan`) for the runtime-side relay. */
     fun enqueueCommand(line: String) {

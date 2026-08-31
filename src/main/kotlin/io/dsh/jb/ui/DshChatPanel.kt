@@ -28,6 +28,8 @@ import io.dsh.jb.chat.ToolCardRow
 import io.dsh.jb.chat.ToolCardStatus
 import io.dsh.jb.chat.TranscriptRow
 import io.dsh.jb.chat.TranscriptState
+import io.dsh.jb.protocol.SessionEventNotification
+import io.dsh.jb.protocol.SessionStatusNotification
 import io.dsh.jb.chat.UserRow
 import io.dsh.jb.diff.FileChange
 import io.dsh.jb.diff.FsDiffParser
@@ -127,6 +129,13 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     /** The chip whose preview is open, so every chip previews and removal dismisses it. */
     private var activeChip: String? = null
 
+    // Item 5/17b: Kilo-style visibility-gated update queue — incoming events are
+    // batched into ONE 150 ms EDT flush with a pre-batch scroll snapshot, so the
+    // transcript never re-renders per chunk (Kilo SessionUpdateQueue pattern).
+    private val pendingEvents = java.util.Collections.synchronizedList(mutableListOf<SessionEventNotification>())
+    private val pendingStatuses = java.util.Collections.synchronizedList(mutableListOf<SessionStatusNotification>())
+    private val flushTimer = javax.swing.Timer(150) { flushTranscript() }.apply { isRepeats = true }
+
     private val contextTab = tabButton("Context")
     private val actionTab = tabButton("Ask ▾")
     private val modelTab = tabButton("Model")
@@ -166,6 +175,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     private val rowWidgets = LinkedHashMap<String, RowWidget>()
     private var wasAtBottom = true
     private var lastMax = 0
+    private var lastRowsWidth = -1
     private var modelIds: List<String> = emptyList()
     private var populatingModels = false
     private var settingsOpenedForKey = false
@@ -325,13 +335,22 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             if (e.valueIsAdjusting) wasAtBottom = false
         }
         rowsPanel.addComponentListener(object : ComponentAdapter() {
-            override fun componentResized(e: ComponentEvent) { reflowAll() }
+            override fun componentResized(e: ComponentEvent) {
+                // Only reflow when the WIDTH changed: firing on every resize
+                // (including the layout's own pass) created a feedback storm
+                // that moved the viewport (2026-08-31 scroll trace).
+                val w = rowsPanel.width
+                if (w != lastRowsWidth) {
+                    lastRowsWidth = w
+                    reflowAll()
+                }
+            }
         })
 
-        model.addListener { state -> ApplicationManager.getApplication().invokeLater { render(state) } }
         val service = DshRuntimeService.getInstance(project)
-        service.addEventListener(model::onEvent)
-        service.addStatusListener(model::onStatus)
+        service.addEventListener(::enqueueEvent)
+        service.addStatusListener(::enqueueStatus)
+        flushTimer.start()
         // Roadmap item 11 remainder: editor context actions preload the composer.
         project.getService(ComposerRequests::class.java).addListener { action, text ->
             ApplicationManager.getApplication().invokeLater {
@@ -847,7 +866,32 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     }
 
 
-    private fun render(state: TranscriptState) {
+    /** Batched EDT flush: applies all pending events to the model, then renders once. */
+    private fun flushTranscript() {
+        if (!isShowing) return
+        val events: List<SessionEventNotification> = synchronized(pendingEvents) {
+            pendingEvents.toList().also { pendingEvents.clear() }
+        }
+        val statuses: List<SessionStatusNotification> = synchronized(pendingStatuses) {
+            pendingStatuses.toList().also { pendingStatuses.clear() }
+        }
+        if (events.isEmpty() && statuses.isEmpty()) return
+        // Snapshot the follow state BEFORE the batch applies (Kilo's rule).
+        val follow = wasAtBottom
+        events.forEach(model::onEvent)
+        statuses.forEach(model::onStatus)
+        render(model.state(), follow)
+    }
+
+    private fun enqueueEvent(e: SessionEventNotification) {
+        pendingEvents += e
+    }
+
+    private fun enqueueStatus(s: SessionStatusNotification) {
+        pendingStatuses += s
+    }
+
+    private fun render(state: TranscriptState, followOverride: Boolean? = null) {
         statusLabel.text = when {
             !startedOk -> "DSH agent: starting…"
             state.running -> "DSH agent: running…"
@@ -882,10 +926,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
         val seen = HashSet<String>()
         var changed = false
-        // Snapshot the follow state BEFORE any row mutation: reading it after
-        // reflowAll() picks up transient scrollbar states and force-pins the
-        // viewport to the bottom while the user scrolled up (2026-08-30).
-        val follow = wasAtBottom
+        // Follow state comes from the pre-batch snapshot (or the live flag for
+        // direct renders); reading it after reflowAll() picks up transient
+        // scrollbar states and force-pins the viewport (2026-08-30).
+        val follow = followOverride ?: wasAtBottom
         for (row in state.rows) {
             seen += row.id
             val widget = rowWidgets[row.id]
@@ -1158,12 +1202,18 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     }
 
     private fun sizeToContent(area: JBTextArea, width: Int) {
-        area.size = Dimension((width - 32).coerceAtLeast(40), Int.MAX_VALUE)
-        val height = area.preferredSize.height.coerceAtLeast(area.minimumSize.height)
-        area.preferredSize = Dimension(area.preferredSize.width, height)
+        // Measure via the View API — never setSize(MAX_VALUE): the size hack
+        // perturbed the layout mid-pass and moved the viewport during content
+        // growth (2026-08-31 scroll trace).
+        val w = (width - 32).coerceAtLeast(40)
+        val rootView = area.getUI().getRootView(area)
+        rootView.setSize(w.toFloat(), Int.MAX_VALUE.toFloat())
+        val height = rootView.getPreferredSpan(javax.swing.text.View.Y_AXIS).toInt().coerceAtLeast(0)
+        area.preferredSize = Dimension(w, height)
     }
 
     override fun dispose() {
+        flushTimer.stop()
         mentionWindow?.dispose()
         mentionWindow = null
         scope.cancel()

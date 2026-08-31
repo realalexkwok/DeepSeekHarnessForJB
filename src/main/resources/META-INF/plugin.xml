@@ -7,6 +7,7 @@
     Community plugin that embeds a DeepSeek Harness (DSH) coding agent in IntelliJ IDEA
     and Android Studio: a chat tool window, agentic editing with diff preview and apply,
     plan mode, permission dialogs, and project-wide search/edit/shell capabilities.
+    Known limitation: the transcript may auto-scroll to the bottom during heavy streaming.
     ]]></description>
 
     <!-- Platform-only dependency: loads in IntelliJ IDEA AND Android Studio. -->

@@ -146,13 +146,12 @@
   modeled on kilocode's `killCliProcessTree`) — instead of the graceful
   JSON-RPC shutdown, which can block mid-tool-execution. The next send
   restarts the runtime lazily (same pool-restart path as a model/effort switch).
-- Transcript auto-scroll: KNOWN LIMITATION (2026-08-30, skipped per user) —
-  during streaming the panel still re-pins to the bottom while the user scrolls
-  up. Three event/flag-based fixes (model ChangeListener, execution-time pin
-  guards, intent-based disengage) did not resolve it in the host IDE. Root
-  remedy: rebuild the transcript as a proper list/table model (new UI task,
-  recorded in roadmap item 5) instead of the growing-panel approach. The
-  current guards remain as mitigation.
+- Transcript auto-scroll: KNOWN LIMITATION (17b closed 2026-09-01 per user) —
+  the 17b architecture landed (150 ms batched queue, pre-batch follow
+  snapshot, intent disengage, View-API measurement, width-guarded reflow) and
+  reduced oscillation, but streaming still re-pins in the host IDE; the
+  residual viewport mover was not root-caused. The remaining remedy is a
+  JList-based transcript rewrite; deferred.
 - KNOWN LIMITATION: Ask/Execute are ADVISORY prompt instructions only — the
   runtime currently runs `danger-full-access` regardless of the selected action,
   so the agent can still modify files in Ask mode. Plan mode (`/plan`) is real

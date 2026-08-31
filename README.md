@@ -86,7 +86,8 @@ platform (~80 MB each).
   permission mode (`workspace-write` default asks before out-of-workspace
   effects).
 - The transcript auto-scroll can re-pin to the bottom during heavy streaming;
-  a list/table-based transcript rebuild is planned (17b).
+  17b's batched-queue architecture reduced it, but the residual re-pin is a
+  recorded limitation pending a JList-based transcript rewrite.
 - The initial Current-file context chip appears only after the first keystroke
   or focus event (cosmetic, recorded 2026-08-31).
 - Diff previews are read-only; edits are applied by the agent itself.

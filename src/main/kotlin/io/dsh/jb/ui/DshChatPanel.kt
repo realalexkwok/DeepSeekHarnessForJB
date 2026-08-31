@@ -49,6 +49,10 @@ import java.awt.Font
 import java.awt.event.ActionEvent
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import java.awt.event.FocusAdapter
+import java.awt.event.FocusEvent
+import java.awt.event.HierarchyEvent
+import java.awt.event.HierarchyListener
 import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
@@ -108,6 +112,20 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     }
     private val todoToggle = JButton("Todos (0) ▾")
     private val todoList = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
+
+    // Item 15: Kilo-style context chips above the composer, with a collapsible
+    // preview (collapsed by default; X removes the context).
+    private val contextChips = JPanel(WrapLayout()).apply { isOpaque = false }
+    private val contextPreview = transcriptText().apply {
+        border = BorderFactory.createEmptyBorder(4, 12, 4, 12)
+        foreground = JBColor.GRAY
+    }
+    private val contextPreviewScroll = JBScrollPane(contextPreview).apply {
+        preferredSize = Dimension(0, 90)
+        isVisible = false
+    }
+    /** The chip whose preview is open, so every chip previews and removal dismisses it. */
+    private var activeChip: String? = null
 
     private val contextTab = tabButton("Context")
     private val actionTab = tabButton("Ask ▾")
@@ -213,6 +231,13 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             todoWrap.revalidate()
         }
         bottom.add(todoWrap, BorderLayout.NORTH)
+        // Item 15: context chips + preview sit between todos and the composer.
+        val contextWrap = JPanel(BorderLayout())
+        contextWrap.add(contextChips, BorderLayout.NORTH)
+        contextWrap.add(contextPreviewScroll, BorderLayout.CENTER)
+        bottom.add(contextWrap, BorderLayout.CENTER)
+        contextFileItem.addActionListener { refreshContextChips() }
+        contextAgentsItem.addActionListener { refreshContextChips() }
         val composerBlock = JPanel(BorderLayout())
         val inputScroll = JBScrollPane(input).apply { preferredSize = Dimension(0, 64) }
         composerBlock.add(inputScroll, BorderLayout.CENTER)
@@ -324,6 +349,24 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             ApplicationManager.getApplication().invokeLater { populateModels(catalog) }
         }
         scope.launch { startRuntime("") }
+        refreshContextChips()
+        // Item 15: the construction-time refresh runs before the tool window
+        // lays this panel out and before the editor context is visible — so
+        // re-refresh when the panel becomes displayable and on every focus
+        // regain (manual-test 2026-08-31: the initial chip stayed hidden until
+        // the first keystroke).
+        addHierarchyListener(object : HierarchyListener {
+            override fun hierarchyChanged(e: HierarchyEvent) {
+                if (e.changeFlags.toLong() and HierarchyEvent.DISPLAYABILITY_CHANGED.toLong() != 0L && isDisplayable) {
+                    ApplicationManager.getApplication().invokeLater { refreshContextChips() }
+                }
+            }
+        })
+        addFocusListener(object : FocusAdapter() {
+            override fun focusGained(e: FocusEvent) {
+                ApplicationManager.getApplication().invokeLater { refreshContextChips() }
+            }
+        })
     }
 
     private fun tabButton(label: String): JButton = JButton(label).apply {
@@ -474,6 +517,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val text = input.text.trim()
         if (text.isEmpty()) return
         input.text = ""
+        refreshContextChips()
         // Typed slash commands route through the bridge command relay — they
         // must NOT reach the model as prompt text (2026-08-30 manual-test bug:
         // a literal "/plan" prompt ran a real 10-minute agentic turn).
@@ -586,6 +630,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     /** Item 14: refresh the @-mention picker for the trailing `@token`. */
     private fun updateMentions() {
+        // Chips refresh on EVERY document change, before any picker logic: the
+        // early returns below skipped them, so mention chips never appeared
+        // (manual-test 2026-08-31).
+        refreshContextChips()
         if (mentionJustInserted) {
             // The just-inserted `@path` must not re-open the picker.
             mentionJustInserted = false
@@ -709,6 +757,95 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         mentionStart = -1
         mentionWindow?.isVisible = false
     }
+    /** Item 15: rebuild the chips for the active context sources. */
+    private fun refreshContextChips() {
+        contextChips.removeAll()
+        val titles = mutableListOf<String>()
+        val editor: Editor? = FileEditorManager.getInstance(project).selectedTextEditor
+        val file = editor?.let { FileDocumentManager.getInstance().getFile(it.document) }
+        if (contextFileItem.isSelected && file != null) {
+            val title = "Current file: " + file.name
+            addChip(title, { editor?.document?.text ?: "" }) {
+                contextFileItem.isSelected = false
+                refreshContextChips()
+            }
+            titles += title
+        }
+        val agents = project.basePath
+            ?.let { File(it, "AGENTS.md") }
+            ?.takeIf { it.isFile }
+            ?.let { runCatching { it.readText() }.getOrNull() }
+        if (contextAgentsItem.isSelected && agents != null) {
+            addChip("AGENTS.md", { agents }) {
+                contextAgentsItem.isSelected = false
+                refreshContextChips()
+            }
+            titles += "AGENTS.md"
+        }
+        val base = File(project.basePath ?: ".").canonicalFile
+        val basePrefix = base.path + File.separator
+        for (mention in PromptAssembly.parseMentions(input.text)) {
+            val f = File(base, mention).canonicalFile
+            if (f.isFile && f.path.startsWith(basePrefix)) {
+                val title = "@" + mention
+                addChip(title, { runCatching { f.readText() }.getOrDefault("") }) {
+                    val token = java.util.regex.Pattern.quote(mention)
+                    input.text = input.text.replace("@" + token + " ", " ").replace("@" + token, "")
+                    refreshContextChips()
+                }
+                titles += title
+            }
+        }
+        // Dismiss the preview when its chip is gone (X or token removal) —
+        // manual-test 2026-08-31: the preview outlived a closed chip.
+        if (activeChip != null && activeChip !in titles) {
+            activeChip = null
+            contextPreviewScroll.isVisible = false
+        }
+        // Revalidate the chip panel AND its parent: BorderLayout must see the
+        // WRAPPED height (plain FlowLayout under-reports it and clips wrapped
+        // rows — manual-test 2026-08-31).
+        contextChips.revalidate()
+        (contextChips.parent as? JComponent)?.revalidate()
+        contextChips.repaint()
+    }
+
+    /** One chip: label (click to preview) + X (remove). */
+    private fun addChip(label: String, content: () -> String, remove: () -> Unit) {
+        val chip = JPanel(FlowLayout(FlowLayout.LEFT, 2, 0)).apply {
+            border = BorderFactory.createLineBorder(JBColor.GRAY, 1, true)
+            isOpaque = false
+        }
+        val labelC = JBLabel(label).apply {
+            addMouseListener(object : MouseAdapter() {
+                override fun mouseClicked(e: MouseEvent?) = togglePreview(label, content)
+            })
+        }
+        val x = JButton("×").apply {
+            border = BorderFactory.createEmptyBorder(0, 2, 0, 2)
+            isContentAreaFilled = false
+            isBorderPainted = false
+            addActionListener { remove() }
+        }
+        chip.add(labelC)
+        chip.add(x)
+        contextChips.add(chip)
+    }
+
+    /** Per-chip preview: the ACTIVE chip drives the panel; re-click dismisses. */
+    private fun togglePreview(title: String, content: () -> String) {
+        if (activeChip == title && contextPreviewScroll.isVisible) {
+            activeChip = null
+            contextPreviewScroll.isVisible = false
+        } else {
+            activeChip = title
+            contextPreview.text = title + "\n" + content().take(PREVIEW_BYTES)
+            contextPreviewScroll.isVisible = true
+        }
+        revalidate()
+        repaint()
+    }
+
 
     private fun render(state: TranscriptState) {
         statusLabel.text = when {
@@ -1032,10 +1169,36 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         scope.cancel()
     }
 
+    /**
+     * FlowLayout that WRAPS rows and reports the full wrapped height — the
+     * chips bar needs it, otherwise wrapped chip rows are clipped (2026-08-31).
+     */
+    private class WrapLayout : FlowLayout(FlowLayout.LEFT, 4, 0) {
+        override fun preferredLayoutSize(target: java.awt.Container): Dimension {
+            val width = target.width.coerceAtLeast(1)
+            var x = 0
+            var y = 0
+            var rowHeight = 0
+            for (i in 0 until target.componentCount) {
+                val pref = target.getComponent(i).preferredSize
+                if (x > 0 && x + pref.width > width) {
+                    x = 0
+                    y += rowHeight + vgap
+                    rowHeight = 0
+                }
+                x += pref.width + hgap
+                rowHeight = maxOf(rowHeight, pref.height)
+            }
+            return Dimension(width, y + rowHeight + vgap)
+        }
+    }
+
     companion object {
         /** Item 14 caps: mentions per prompt, bytes per mentioned file, picker candidates. */
         private const val MAX_MENTIONS = 10
         private const val MAX_MENTION_BYTES = 50_000
         private const val MAX_MENTION_CANDIDATES = 300
+        /** Item 15: preview truncation for context chips. */
+        private const val PREVIEW_BYTES = 2_000
     }
 }

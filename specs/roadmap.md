@@ -68,3 +68,19 @@ High-level implementation order, one small phrase of work per item.
     look; naming: display name "DeepSeek Harness Agent — Kilo-style", slug
     "dsh-kilo-ux" for non-spaced use, plugin id + tool-window id unchanged,
     MIT attribution to Kilo Code (THIRD_PARTY_NOTICES).
+18. Kilo-style popup lists for the composer's bottom tabs (grouped, added
+    2026-09-01): the Context / Action / Model popup menus get Kilo's list
+    look (searchable rows, icons, check/radio states, grouped sections).
+19. Kilo-style typography (grouped, added 2026-09-01): align the composer and
+    transcript font family and sizes with Kilo's session UI scale
+    (SessionEditorStyle / SessionUiStyle).
+20. Multiline composer support (grouped, added 2026-09-01): the composer input
+    grows/shrinks with content, Enter still sends (Shift+Enter for newline, or
+    a configurable send binding), pasted multi-line text stays intact.
+21. Terse input/output rendering (grouped, added 2026-09-01): tool args and
+    results render COLLAPSED by default with expand-on-click (Kilo tool-card
+    style) instead of the current verbose always-expanded blocks; assistant
+    text stays streamed inline.
+22. Session history (grouped, added 2026-09-01): a history list of past
+    sessions (persisted, resumable) in the current Chat mode; the design
+    SHARES the store with a future Agent mode (one history, two modes).

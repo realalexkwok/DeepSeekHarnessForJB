@@ -680,6 +680,10 @@ class DshRuntimeE2eTest {
                     "expected the ripgrep sidecar beside the exe",
                     exeFile.parentFile!!.listFiles()!!.any { it.name.endsWith("-rg") },
                 )
+                assertTrue(
+                    "the sidecar must be EXECUTABLE (jar extraction drops the exec bit)",
+                    exeFile.parentFile!!.listFiles()!!.filter { it.name.endsWith("-rg") }.all { it.canExecute() },
+                )
                 client.prompt("hello")
                 withTimeout(90_000) {
                     while (!(events.any {

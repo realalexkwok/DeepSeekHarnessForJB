@@ -12,6 +12,7 @@ import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
+import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
@@ -48,8 +49,13 @@ import java.awt.Font
 import java.awt.event.ActionEvent
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.io.File
+import javax.swing.event.DocumentEvent
+import javax.swing.event.DocumentListener
 import javax.swing.AbstractAction
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
@@ -63,6 +69,7 @@ import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.JRadioButtonMenuItem
 import javax.swing.KeyStroke
+import javax.swing.JWindow
 import javax.swing.SwingUtilities
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -128,6 +135,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         wrapStyleWord = true
         border = BorderFactory.createEmptyBorder(6, 6, 6, 6)
     }
+
+    // Item 14: @-mention file picker — a NON-FOCUSABLE JWindow above the
+    // composer (JPopupMenu steals keyboard focus once visible, which froze the
+    // input after the first letter — manual-test issue 2026-08-30).
+    private val mentionList = JBList<String>()
+    private var mentionWindow: JWindow? = null
+    private var mentionStart = -1
+    /** Set while inserting a chosen file so the inserted `@path` does not re-open the picker. */
+    private var mentionJustInserted = false
 
     private val rowWidgets = LinkedHashMap<String, RowWidget>()
     private var wasAtBottom = true
@@ -215,6 +231,50 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             override fun actionPerformed(e: ActionEvent) { submit() }
         })
         sendIcon.addActionListener { submit() }
+        // Item 14: @-mention picker wiring (window created lazily once the
+        // panel has a window ancestor).
+        mentionList.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                if (e.clickCount != 1) return
+                // Resolve the clicked entry directly: the list selection can lag
+                // behind the click event (manual-test issue 2026-08-30).
+                val index = mentionList.locationToIndex(e.point)
+                val entry = if (index >= 0) mentionList.model.getElementAt(index) else null
+                if (entry != null) acceptMentionEntry(entry) else acceptMention()
+            }
+        })
+        // Keyboard control lives on the INPUT, never on the list: moving focus
+        // into the popup makes Swing close it (bare-@ popup vanished instantly,
+        // Enter never reached the list — manual-test issues 2026-08-30).
+        input.addKeyListener(object : KeyAdapter() {
+            override fun keyPressed(e: KeyEvent) {
+                if (mentionWindow?.isVisible != true) return
+                when (e.keyCode) {
+                    KeyEvent.VK_ENTER -> {
+                        logger.info("mention: enter entry='${mentionList.selectedValue}' window=${mentionWindow?.isVisible}")
+                        acceptMention()
+                        e.consume()
+                    }
+                    KeyEvent.VK_ESCAPE -> {
+                        hideMentions()
+                        e.consume()
+                    }
+                    KeyEvent.VK_DOWN -> {
+                        moveMentionSelection(1)
+                        e.consume()
+                    }
+                    KeyEvent.VK_UP -> {
+                        moveMentionSelection(-1)
+                        e.consume()
+                    }
+                }
+            }
+        })
+        input.document.addDocumentListener(object : DocumentListener {
+            override fun insertUpdate(e: DocumentEvent) { updateMentions() }
+            override fun removeUpdate(e: DocumentEvent) { updateMentions() }
+            override fun changedUpdate(e: DocumentEvent) {}
+        })
         // The scrollbar MODEL fires on EVERY value change — including mouse-wheel
         // scrolls, which AdjustmentListener never sees (it only fires on thumb
         // drags). Missing wheel events kept wasAtBottom=true after the user
@@ -497,6 +557,21 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             ?.takeIf { it.isFile }
             ?.let { runCatching { it.readText() }.getOrNull() }
         val action = currentAction
+        // Item 14: resolve @<path> tokens to workspace-confined file content.
+        val base = File(project.basePath ?: ".").canonicalFile
+        val basePrefix = base.path + File.separator
+        val mentionedFiles = PromptAssembly.parseMentions(input.text)
+            .take(MAX_MENTIONS)
+            .mapNotNull { mentionPath ->
+                val target = File(base, mentionPath).canonicalFile
+                if (target.isFile && target.path.startsWith(basePrefix)) {
+                    runCatching {
+                        io.dsh.jb.chat.MentionedFile(mentionPath, target.readText().take(MAX_MENTION_BYTES))
+                    }.getOrNull()
+                } else {
+                    null
+                }
+            }
         return PromptContext(
             action = action,
             includeCurrentFile = contextFileItem.isSelected,
@@ -505,7 +580,134 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             currentFileContent = editor?.document?.text,
             selection = selection,
             agentsContent = agentsText,
+            mentionedFiles = mentionedFiles,
         )
+    }
+
+    /** Item 14: refresh the @-mention picker for the trailing `@token`. */
+    private fun updateMentions() {
+        if (mentionJustInserted) {
+            // The just-inserted `@path` must not re-open the picker.
+            mentionJustInserted = false
+            hideMentions()
+            return
+        }
+        val text = input.text
+        // Caret-independent: during the FIRST typed character's document event
+        // the caret has not advanced yet, so searching behind it misses the `@`
+        // (bare-@ never opened — manual-test issue 2026-08-30).
+        val idx = text.lastIndexOf('@')
+        if (idx < 0) {
+            hideMentions()
+            return
+        }
+        val span = text.substring(idx + 1)
+        if (span.contains(' ') || span.contains('\n')) {
+            hideMentions()
+            return
+        }
+        mentionStart = idx
+        val entries = collectMentionPaths(span)
+        mentionList.setListData(entries.toTypedArray())
+        // Debug trace (manual-test 2026-08-30): what the picker decided.
+        logger.info("mention: span='$span' entries=${entries.size} idx=$idx windowVisible=${mentionWindow?.isVisible == true}")
+        if (entries.isNotEmpty()) {
+            mentionList.selectedIndex = 0
+            showMentions()
+        } else {
+            hideMentions()
+        }
+    }
+
+    /** Shows the picker window above the composer WITHOUT taking keyboard focus. */
+    private fun showMentions() {
+        val owner = SwingUtilities.getWindowAncestor(this) ?: return
+        val win = mentionWindow ?: JWindow(owner).also { w ->
+            w.contentPane.add(JBScrollPane(mentionList).apply { preferredSize = Dimension(320, 220) })
+            w.setFocusableWindowState(false)
+            w.isAlwaysOnTop = true
+            mentionWindow = w
+        }
+        win.pack()
+        val loc = input.locationOnScreen
+        win.setLocation(loc.x + 12, loc.y - win.height - 6)
+        win.isVisible = true
+    }
+
+    /** Arrow navigation while the popup is open; wraps within the list bounds. */
+    private fun moveMentionSelection(delta: Int) {
+        val size = mentionList.model.size
+        if (size == 0) return
+        val current = mentionList.selectedIndex.coerceAtLeast(0)
+        mentionList.selectedIndex = (current + delta + size) % size
+        mentionList.ensureIndexIsVisible(mentionList.selectedIndex)
+    }
+
+    /**
+     * Item 14, Kilo look & feel (kilocode KiloPromptCompletionProvider): a FLAT
+     * completion of workspace files shown by their FULL project-relative path;
+     * the typed prefix filters (name OR path), name matches rank first. Hidden
+     * dirs and build outputs excluded, capped.
+     */
+    private fun collectMentionPaths(query: String): List<String> {
+        val base = File(project.basePath ?: ".").canonicalFile
+        val basePrefix = base.path + File.separator
+        val q = query.lowercase()
+        val hits = mutableListOf<String>()
+        runCatching {
+            base.walkTopDown()
+                .onEnter { dir ->
+                    val n = dir.name
+                    !(n.startsWith(".") || n == "node_modules" || n == "build" || n == "out" ||
+                        n == "dist" || n == ".gradle")
+                }
+                .maxDepth(10)
+                .filter { it.isFile }
+                .forEach { f ->
+                    val relative = f.path.removePrefix(basePrefix)
+                    if (q.isEmpty() || relative.lowercase().contains(q)) {
+                        if (hits.size < MAX_MENTION_CANDIDATES) hits += relative
+                    }
+                }
+        }
+        if (q.isNotEmpty()) {
+            hits.sortBy { if (it.substringAfterLast('/').lowercase().contains(q)) 0 else 1 }
+        }
+        return hits
+    }
+
+    /**
+     * Kilo semantics (click and Enter both apply the entry): insert the FULL
+     * workspace-relative path with a trailing space, exactly like Kilo's
+     * `replace(ctx, "@${file.path} ", …)` insert handler.
+     */
+    private fun acceptMentionEntry(entry: String) {
+        val start = mentionStart
+        hideMentions()
+        if (start < 0) return
+        val text = input.text
+        val caret = input.caretPosition.coerceIn(start + 1, text.length)
+        val before = text.substring(0, start)
+        val after = text.substring(caret)
+        val inserted = "@" + entry + " "
+        mentionJustInserted = true
+        input.text = before + inserted + after
+        input.caretPosition = before.length + inserted.length
+        input.requestFocusInWindow()
+        logger.info("mention: inserted $inserted")
+    }
+
+    private fun acceptMention() {
+        val selected = mentionList.selectedValue ?: run {
+            hideMentions()
+            return
+        }
+        acceptMentionEntry(selected)
+    }
+
+    private fun hideMentions() {
+        mentionStart = -1
+        mentionWindow?.isVisible = false
     }
 
     private fun render(state: TranscriptState) {
@@ -825,6 +1027,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     }
 
     override fun dispose() {
+        mentionWindow?.dispose()
+        mentionWindow = null
         scope.cancel()
+    }
+
+    companion object {
+        /** Item 14 caps: mentions per prompt, bytes per mentioned file, picker candidates. */
+        private const val MAX_MENTIONS = 10
+        private const val MAX_MENTION_BYTES = 50_000
+        private const val MAX_MENTION_CANDIDATES = 300
     }
 }

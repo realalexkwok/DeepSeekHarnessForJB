@@ -11,6 +11,9 @@ enum class ComposerAction(val display: String) {
     FIX("Fix"),
 }
 
+/** One `@`-mentioned project file resolved to its content (roadmap item 14). */
+data class MentionedFile(val path: String, val content: String)
+
 /** Everything the composer can inject into one prompt. */
 data class PromptContext(
     val action: ComposerAction,
@@ -20,6 +23,8 @@ data class PromptContext(
     val currentFileContent: String? = null,
     val selection: String? = null,
     val agentsContent: String? = null,
+    /** Item 14: `@<path>` files resolved to content by the composer. */
+    val mentionedFiles: List<MentionedFile> = emptyList(),
 )
 
 /**
@@ -42,6 +47,18 @@ object PromptAssembly {
     private const val FIX_INSTRUCTION =
         "Diagnose and repair the selected code: make the changes needed to fix its problems, then explain what you changed."
 
+    /**
+     * Item 14: the `@<path>` tokens in one prompt, in order, deduplicated.
+     * A token runs until whitespace or the next `@`.
+     */
+    fun parseMentions(text: String): List<String> =
+        Regex("""@([^\s@]+)""")
+            .findAll(text)
+            .map { it.groupValues[1] }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .toList()
+
     fun assemble(userText: String, ctx: PromptContext): String {
         val sections = mutableListOf<String>()
         if (ctx.includeCurrentFile && !ctx.selection.isNullOrBlank()) {
@@ -52,6 +69,10 @@ object PromptAssembly {
         }
         if (ctx.includeAgents && ctx.agentsContent != null) {
             sections += "[AGENTS.md]\n" + ctx.agentsContent
+        }
+        // Item 14: @-mentioned files ride the same [File:] context shape.
+        for (file in ctx.mentionedFiles) {
+            sections += "[File: ${file.path}] (@-mentioned — content already provided below; use it directly instead of searching for this file)\n" + file.content
         }
         val instruction = when (ctx.action) {
             ComposerAction.ASK -> ASK_INSTRUCTION

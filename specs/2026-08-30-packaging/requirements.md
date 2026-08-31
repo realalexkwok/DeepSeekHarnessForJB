@@ -10,7 +10,10 @@
   decision), ripgrep sidecar extracted BESIDE the exe, no node/npm/PATH.
 - First-run extraction: embedded resource -> versioned cache
   (`~/.deepseek-harness-for-jb/runtime/<plugin-version>/<os>-<arch>/`),
-  idempotent, dsh-cline's ensurePluginInstalled pattern.
+  idempotent, dsh-cline's ensurePluginInstalled pattern. EVERY extracted
+  artifact is chmod +x (jar resources lose exec bits; a non-executable
+  ripgrep sidecar broke the glob tool on the bundled carrier — host-verified
+  fix round 2026-08-31, guarded by the bundled e2e).
 - Settings: Bundled executable carrier with an AUTO option (embedded runtime;
   manual override still accepted for externally built exes).
 - Production: a GitHub Actions workflow builds the three exes from the pinned

@@ -79,7 +79,11 @@ object BundledRuntimeResolver {
             dir.listFiles()?.forEach { it.delete() }
             return null
         }
-        runCatching { exe.setExecutable(true) }
+        // EVERY extracted artifact must be executable: jar resources lose the
+        // exec bit, and the harness spawns the ripgrep sidecar beside the exe —
+        // a non-executable sidecar breaks the glob tool ("ripgrep launch
+        // failed", host-verified 2026-08-31).
+        dir.listFiles()?.forEach { runCatching { it.setExecutable(true) } }
         File(dir, ".stamp").writeText(RUNTIME_VERSION)
         return exe
     }

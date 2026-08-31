@@ -39,6 +39,30 @@ class PromptAssemblyTest {
     }
 
     @Test
+    fun `mentions parse in order and deduplicate`() {
+        assertEquals(
+            listOf("src/a.kt", "docs/b.md"),
+            PromptAssembly.parseMentions("fix @src/a.kt and @docs/b.md again @src/a.kt"),
+        )
+    }
+
+    @Test
+    fun `mentioned files render as context sections`() {
+        val text = PromptAssembly.assemble(
+            "use it",
+            PromptContext(
+                ComposerAction.EXECUTE,
+                includeCurrentFile = false,
+                includeAgents = false,
+                mentionedFiles = listOf(MentionedFile("src/a.kt", "val a = 1")),
+            ),
+        )
+        assertTrue(text.startsWith("[File: src/a.kt] (@-mentioned"))
+        assertTrue(text.contains("val a = 1"))
+        assertTrue(text.contains("use it"))
+    }
+
+    @Test
     fun `plan appends the plan-first instruction`() {
         val text = PromptAssembly.assemble(
             "refactor it",

@@ -1,6 +1,6 @@
 <idea-plugin>
     <id>io.dsh.jb.deepseek-harness</id>
-    <name>Community DSH Agent</name>
+    <name>DeepSeek Harness Agent — Kilo-style</name>
     <vendor>DeepSeekHarnessForJB community</vendor>
 
     <description><![CDATA[

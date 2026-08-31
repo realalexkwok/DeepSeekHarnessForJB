@@ -25,9 +25,12 @@ High-level implementation order, one small phrase of work per item.
    initialize / session/prompt / shutdown
 4. Event model: map session.event vocabulary to Kotlin types
 5. Chat tool window: transcript, streaming text, tool cards, thinking disclosure
-   — follow-up (2026-08-30): rebuild the transcript around a list/table model;
-   the growing-panel approach cannot fix the streaming auto-scroll re-pin
-   (known limitation in specs/tech-stack.md; skip approved by user)
+   — REPLANNED (2026-08-31, item 17 group): rebuild the transcript on Kilo
+   Code's SessionMessageListPanel architecture — list-based messages, per-part
+   views updated in place (ViewFactory), a visibility-gated update queue +
+   condenser (150 ms batching), and scroll-follow that pins only when the user
+   was at the bottom BEFORE the update. This replaces the growing-panel
+   approach and its streaming auto-scroll re-pin limitation.
 6. Context picker: AGENTS.md / current file / rules — all selected by default
    — subset pulled forward 2026-08-27 (specs/2026-08-27-composer): Current file +
    AGENTS.md checkboxes in the composer; "workspace rules" remains for this item.
@@ -47,10 +50,21 @@ High-level implementation order, one small phrase of work per item.
 13. Verification: unit tests, runPlugin smoke, README
 14. Composer @-mentions: type '@' to pick project files and insert them as context
     (added 2026-08-27 per user request; implemented in roadmap order)
-15. Composer context attachments: collapsed compact view instead of inline full
-    content (added 2026-08-27; deferred — replanned after all tasks per user)
+15. Composer context attachments — REPLANNED (2026-08-31, item 17 group):
+    Kilo Code's prompt-attachment model — compact context CHIPS above the
+    composer (current file, AGENTS.md, selection, each @-mention): collapsed by
+    default, click to preview, remove to drop the context; @-mentions also
+    render as chips in the transcript (Kilo PromptMention/linkifyMentions look).
 16. Settings simplification (grouped, added 2026-08-30): remove the Bundled
     executable path input (embedded runtime only — the pinned harness version
     is what matters while DSH is in active development); remove Base URL and
     Model fields (Model is chosen in the composer); mask a stored API key so
     the page shows it is set.
+17. Kilo-style UX alignment + naming/attribution (grouped, added 2026-08-31):
+    (a) item 15 replanned as Kilo prompt-attachment chips; (b) item 5 follow-up
+    replanned as the Kilo SessionMessageListPanel transcript architecture;
+    (c) done-item audit — permission asks get Kilo's FIFO pending queue +
+    inline card look, plan/generic questions get Kilo's keyed question-card
+    look; naming: display name "DeepSeek Harness Agent — Kilo-style", slug
+    "dsh-kilo-ux" for non-spaced use, plugin id + tool-window id unchanged,
+    MIT attribution to Kilo Code (THIRD_PARTY_NOTICES).

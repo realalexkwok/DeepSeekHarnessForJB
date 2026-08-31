@@ -107,6 +107,14 @@
   && git restore . && git apply /home/superguo/.dsh-workaround.patch`, and
   restart `dsh_web`.
 
+## Naming & attribution (2026-08-31)
+- Display name: **DeepSeek Harness Agent — Kilo-style**; non-spaced slug:
+  `dsh-kilo-ux`. The technical plugin id (`io.dsh.jb.deepseek-harness`) and the
+  tool-window id (`DSH Community`) stay unchanged for layout/update stability.
+- The look & feel deliberately follows Kilo Code's UX patterns (MIT license) to
+  reduce friction — we reimplement, never fork. Substantial pattern adoptions
+  are attributed to Kilo Code in THIRD_PARTY_NOTICES.
+
 ## Inputs the user supplies
 - DeepSeek API key (primary, entered in settings and stored in the OS keychain via
   `PasswordSafe` — never in environment variables or settings files), optional base

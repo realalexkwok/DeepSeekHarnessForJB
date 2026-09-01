@@ -45,6 +45,8 @@ class QuestionDialog(private val question: PlanQuestion) : DialogWrapper(true) {
         text.isEditable = false
         text.lineWrap = true
         text.wrapStyleWord = true
+        // Item 19: question bodies read the transcript font.
+        text.font = DshEditorStyle.current().transcriptFont
         panel.add(JBScrollPane(text), BorderLayout.CENTER)
 
         val south = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }

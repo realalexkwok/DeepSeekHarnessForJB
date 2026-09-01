@@ -40,6 +40,8 @@ class PermissionDialog(private val approval: BridgeApproval) : DialogWrapper(tru
         text.isEditable = false
         text.lineWrap = true
         text.wrapStyleWord = true
+        // Item 19: tool/command text reads the editor (mono) font.
+        text.font = DshEditorStyle.current().editorFont
         panel.add(JBScrollPane(text), BorderLayout.CENTER)
         return panel
     }

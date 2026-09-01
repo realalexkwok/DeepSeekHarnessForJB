@@ -44,6 +44,10 @@ import io.dsh.jb.settings.DshSettingsConfigurable
 import io.dsh.jb.settings.DshSettingsState
 import io.dsh.jb.settings.ModelCatalog
 import io.dsh.jb.settings.ModelInfo
+import com.intellij.ide.ui.LafManagerListener
+import com.intellij.openapi.editor.colors.EditorColorsListener
+import com.intellij.openapi.editor.colors.EditorColorsManager
+import com.intellij.openapi.editor.colors.EditorColorsScheme
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
@@ -77,6 +81,7 @@ import javax.swing.JRadioButtonMenuItem
 import javax.swing.KeyStroke
 import javax.swing.JWindow
 import javax.swing.SwingUtilities
+import javax.swing.text.JTextComponent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -91,7 +96,11 @@ import kotlinx.coroutines.launch
  * Model + Effort radio submenus + Settings…. The submit icon sits right of the
  * buttons. Prompts route to the (model, effort)-keyed runtime pool.
  */
-class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
+class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Disposable, DshStyleTarget {
+
+    // Item 19: the typography snapshot every surface reads; declared FIRST so
+    // field initializers (contextPreview, transcriptText) can use it.
+    private var style: DshEditorStyle = DshEditorStyle.current()
 
     private val model = ChatTranscriptModel()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -186,8 +195,9 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     private sealed class RowWidget {
         abstract fun component(): JComponent
-        class Static(private val c: JComponent) : RowWidget() {
-            override fun component() = c
+        /** Item 19: typed parts so [applyStyle] can restyle static rows in place. */
+        class Static(val parts: StaticParts) : RowWidget() {
+            override fun component() = parts.panel
         }
         class Assistant(val parts: AssistantParts) : RowWidget() {
             override fun component() = parts.panel
@@ -196,6 +206,14 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             override fun component() = parts.panel
         }
     }
+
+    private class StaticParts(
+        val panel: JComponent,
+        val header: JBLabel?,
+        val text: JTextComponent,
+        val small: Boolean = false,
+        val hint: Int = Font.PLAIN,
+    )
 
     private class AssistantParts(
         val panel: JComponent,
@@ -221,6 +239,27 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     }
 
     init {
+        // Item 19: re-snapshot typography on GLOBAL scheme changes. Evidence
+        // (platform bytecode 2025.1.3, 2026-09-01): Settings → Editor → Font
+        // goes through EditorColorsManagerImpl.setGlobalScheme →
+        // syncPublisher(TOPIC), which may deliver OFF the EDT — so the handler
+        // must hop to the EDT (Kilo wraps it the same way). NOTE: Ctrl/Cmd+wheel
+        // zoom is a PER-EDITOR local override (MyColorSchemeDelegate.myFontSize,
+        // PropertyChange "fontSize" only) — it never touches the global scheme,
+        // so the chat follows Settings-driven font changes, not per-editor wheel
+        // zoom (Kilo has the identical limitation on this platform).
+        val styleBus = ApplicationManager.getApplication().messageBus.connect(this)
+        styleBus.subscribe(EditorColorsManager.TOPIC, object : EditorColorsListener {
+            override fun globalSchemeChange(scheme: EditorColorsScheme?) {
+                ApplicationManager.getApplication().invokeLater {
+                    logger.info("style: globalSchemeChange transcriptFont=" + DshEditorStyle.current().transcriptFont.size)
+                    applyStyle(DshEditorStyle.current())
+                }
+            }
+        })
+        styleBus.subscribe(LafManagerListener.TOPIC, LafManagerListener {
+            ApplicationManager.getApplication().invokeLater { applyStyle(DshEditorStyle.current()) }
+        })
         val header = JPanel(BorderLayout())
         header.border = JBUI.Borders.empty(8, 12, 4, 12)
         header.add(statusLabel, BorderLayout.WEST)
@@ -386,6 +425,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                 ApplicationManager.getApplication().invokeLater { refreshContextChips() }
             }
         })
+        applyStyle(DshEditorStyle.current())
     }
 
     private fun tabButton(label: String): JButton = JButton(label).apply {
@@ -1051,29 +1091,33 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         is NoticeRow -> RowWidget.Static(noticePanel(row))
     }
 
-    private fun userPanel(row: UserRow): JComponent {
+    private fun userPanel(row: UserRow): StaticParts {
         val panel = rowShell()
         val name = JBLabel(if (row.pending) "You · sending…" else "You").apply {
             foreground = JBColor.GRAY
-            font = font.deriveFont(Font.BOLD)
+            font = style.headerFont
         }
         val text = transcriptText().apply { text = row.content }
         if (row.pending) text.foreground = JBColor.GRAY
         panel.add(name, BorderLayout.NORTH)
         panel.add(text, BorderLayout.CENTER)
-        return panel
+        return StaticParts(panel, name, text)
     }
 
     private fun assistantParts(row: AssistantRow): AssistantParts {
         val panel = rowShell()
-        val header = JBLabel().apply { font = font.deriveFont(Font.BOLD) }
+        val header = JBLabel().apply { font = style.headerFont }
         val textArea = transcriptText()
         val thinkingToggle = JButton("▸ Thinking")
         val thinkingArea = transcriptText().apply {
             foreground = JBColor.GRAY
+            font = style.smallEditorFont
             isVisible = false
         }
-        val usage = JBLabel("").apply { foreground = JBColor.GRAY }
+        val usage = JBLabel("").apply {
+            foreground = JBColor.GRAY
+            font = style.smallFont
+        }
         val body = JPanel(BorderLayout())
         body.add(thinkingToggle, BorderLayout.NORTH)
         body.add(thinkingArea, BorderLayout.NORTH)
@@ -1094,10 +1138,13 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     private fun toolParts(row: ToolCardRow): ToolParts {
         val panel = rowShell()
-        val header = JBLabel().apply { font = font.deriveFont(Font.BOLD) }
+        val header = JBLabel().apply { font = style.headerFont }
         val argsArea = transcriptText(mono = true)
         val resultArea = transcriptText()
-        val errorLabel = JBLabel("").apply { foreground = JBColor(0xc0392b, 0xe06c75) }
+        val errorLabel = JBLabel("").apply {
+            foreground = JBColor(0xc0392b, 0xe06c75)
+            font = style.smallFont
+        }
         val diffButton = JButton("Diff").apply { isVisible = false }
         val metaToggle = JButton("raw meta ▸")
         val metaArea = transcriptText(mono = true).apply { isVisible = false }
@@ -1132,24 +1179,27 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         return parts
     }
 
-    private fun noticePanel(row: NoticeRow): JComponent {
+    private fun noticePanel(row: NoticeRow): StaticParts {
         val panel = JPanel(BorderLayout())
         panel.border = JBUI.Borders.empty(2, 12)
         // Selectable + wrapping so the full text is visible and copyable (2026-08-28).
+        val hint = if (row.kind == NoticeKind.APPROVAL_ASKED || row.kind == NoticeKind.APPROVAL_DECIDED) {
+            Font.BOLD
+        } else {
+            Font.ITALIC
+        }
         val label = transcriptText().apply {
             text = row.text
             foreground = JBColor.GRAY
-            font = font.deriveFont(Font.ITALIC, font.size2D - 1f)
+            font = style.smallFont.deriveFont(hint)
         }
         when (row.kind) {
             NoticeKind.PLAN_MODE, NoticeKind.API_KEY_MISSING ->
                 label.foreground = JBColor(0xb26b00, 0xdfb14a)
-            NoticeKind.APPROVAL_ASKED, NoticeKind.APPROVAL_DECIDED ->
-                label.font = label.font.deriveFont(Font.BOLD, label.font.size2D)
             else -> Unit
         }
         panel.add(label, BorderLayout.CENTER)
-        return panel
+        return StaticParts(panel, null, label, small = true, hint = hint)
     }
 
     private fun AssistantParts.update(row: AssistantRow) {
@@ -1202,13 +1252,51 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         todoList.repaint()
     }
 
+    /** Item 19: mono surfaces read the EDITOR font; chat text reads the UI
+     * family at the editor size (transcriptFont tracks Ctrl+wheel zoom). */
     private fun transcriptText(mono: Boolean = false): JBTextArea = JBTextArea().apply {
         isEditable = false
         lineWrap = true
         wrapStyleWord = true
         isOpaque = false
         border = BorderFactory.createEmptyBorder()
-        if (mono) font = Font(Font.MONOSPACED, Font.PLAIN, 12)
+        font = if (mono) style.editorFont else style.transcriptFont
+    }
+
+    /** Item 19: apply the snapshot to every live surface without rebuilding nodes. */
+    override fun applyStyle(newStyle: DshEditorStyle) {
+        style = newStyle
+        statusLabel.font = newStyle.smallFont
+        statusLabel.foreground = JBColor.GRAY
+        planBadge.font = newStyle.smallFont
+        input.font = newStyle.transcriptFont
+        contextPreview.font = newStyle.transcriptFont
+        for (widget in rowWidgets.values) {
+            when (widget) {
+                is RowWidget.Assistant -> {
+                    widget.parts.header.font = newStyle.headerFont
+                    widget.parts.textArea.font = newStyle.transcriptFont
+                    widget.parts.thinkingArea.font = newStyle.smallEditorFont
+                    widget.parts.usage.font = newStyle.smallFont
+                }
+                is RowWidget.Tool -> {
+                    widget.parts.header.font = newStyle.headerFont
+                    widget.parts.argsArea.font = newStyle.editorFont
+                    widget.parts.resultArea.font = newStyle.transcriptFont
+                    widget.parts.metaArea.font = newStyle.editorFont
+                    widget.parts.errorLabel.font = newStyle.smallFont
+                }
+                is RowWidget.Static -> {
+                    widget.parts.header?.font = newStyle.headerFont
+                    var textFont = if (widget.parts.small) newStyle.smallFont else newStyle.transcriptFont
+                    if (widget.parts.hint != Font.PLAIN) textFont = textFont.deriveFont(widget.parts.hint)
+                    widget.parts.text.font = textFont
+                }
+            }
+        }
+        reflowAll()
+        rowsPanel.revalidate()
+        rowsPanel.repaint()
     }
 
     private fun rowShell(): JPanel = JPanel(BorderLayout()).apply {

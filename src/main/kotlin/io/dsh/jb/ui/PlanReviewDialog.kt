@@ -40,6 +40,8 @@ class PlanReviewDialog(private val question: PlanQuestion) : DialogWrapper(true)
         text.isEditable = false
         text.lineWrap = true
         text.wrapStyleWord = true
+        // Item 19: plan bodies read the transcript font.
+        text.font = DshEditorStyle.current().transcriptFont
         panel.add(JBScrollPane(text), BorderLayout.CENTER)
         return panel
     }

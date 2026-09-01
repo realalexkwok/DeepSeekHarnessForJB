@@ -157,4 +157,13 @@
   so the agent can still modify files in Ask mode. Plan mode (`/plan`) is real
   (harness-enforced review gate), not advisory. Per-action permission-mode
   wiring is a follow-up roadmap item.
+- Typography (item 19, closed 2026-09-01 per user): the chat follows GLOBAL
+  editor font-size changes (Settings → Editor → Font → Apply;
+  EditorColorsManager.TOPIC) and theme switches (LafManagerListener.TOPIC).
+  KNOWN LIMITATION — Cmd/Ctrl+wheel editor zoom is a PER-EDITOR local override
+  (bytecode evidence, ideaIC 2025.1.3: EditorComponentImpl → EditorImpl.setFontSize
+  → MyColorSchemeDelegate local fontSize + PropertyChange only; the global
+  scheme and the message-bus topic are never touched), so it cannot propagate
+  to the chat. Kilo Code has the identical limitation; wheel gestures over the
+  chat only scroll.
 

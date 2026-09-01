@@ -6,6 +6,7 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
 import java.awt.BorderLayout
 import java.awt.Dimension
+import java.awt.Font
 import java.awt.FlowLayout
 import java.awt.Window
 import java.awt.event.KeyAdapter
@@ -45,6 +46,8 @@ class PopupListWindow(
     private val search = JBTextField()
     private val list = JBList<PopupRow>()
     private var items: List<PopupRow> = emptyList()
+    // Item 19: typography snapshot refreshed per show (popups are short-lived).
+    private var style: DshEditorStyle = DshEditorStyle.current()
 
     init {
         isAlwaysOnTop = true
@@ -62,10 +65,12 @@ class PopupListWindow(
             }
             if (row.header) {
                 panel.add(JBLabel("<html><b>${escapeHtml(row.bold)}</b></html>").apply {
+                    font = style.smallFont.deriveFont(Font.BOLD)
                     foreground = if (selected) list.selectionForeground else com.intellij.ui.JBColor.GRAY
                 })
                 if (row.plain.isNotEmpty()) {
                     panel.add(JBLabel("<html><font color='#808080'>${escapeHtml(row.plain)}</font></html>").apply {
+                        font = style.smallFont
                         foreground = if (selected) list.selectionForeground else com.intellij.ui.JBColor.GRAY
                     })
                 }
@@ -76,10 +81,12 @@ class PopupListWindow(
                 }
                 panel.add(tick)
                 panel.add(JBLabel("<html><b>${escapeHtml(row.bold)}</b></html>").apply {
+                    font = style.boldFont
                     foreground = if (selected) list.selectionForeground else list.foreground
                 })
                 if (row.plain.isNotEmpty()) {
                     panel.add(JBLabel("<html><font color='#808080'>${escapeHtml(row.plain)}</font></html>").apply {
+                        font = style.smallFont
                         foreground = if (selected) list.selectionForeground else com.intellij.ui.JBColor.GRAY
                     })
                 }
@@ -143,6 +150,8 @@ class PopupListWindow(
 
     /** Shows the window above [anchor] with the given rows and focuses the search field. */
     fun show(anchor: JComponent, rows: List<PopupRow>) {
+        style = DshEditorStyle.current()
+        search.font = style.regularFont
         items = rows
         search.text = ""
         list.setListData(items.toTypedArray())

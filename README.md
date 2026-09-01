@@ -12,15 +12,15 @@ so no Node.js, npm, or separate harness installation is required.
 
 - **Chat tool window** with streaming text, thinking disclosure, tool cards,
   diffs, and todo tracking.
-- **Composer actions**: Ask (confirm-first), Execute, Plan (real harness plan
-  mode with an approve/keep-planning review dialog), Fix; context pickers for
-  the current file and AGENTS.md; model + reasoning-effort selection.
+- **Composer actions**: Ask (confirm-first), Code, Plan (real harness plan
+  mode with an approve/keep-planning review dialog), Debug; context pickers
+  for the current file and AGENTS.md; model + reasoning-effort selection.
 - **Slash commands**: `/plan` and `/plan off` are relayed to the harness.
 - **Permissions**: `workspace-write` by default — out-of-workspace effects ask
   through an Approve-tool dialog; `danger-full-access` selectable in settings.
   Generic `ask_user_question` calls render in a question dialog.
 - **Editor context actions**: on a text selection, right-click →
-  *DeepSeek Harness* → Ask / Explain / Fix Selection.
+  *DeepSeek Harness* → Ask / Explain / Debug Selection.
 - **Stop button**: the send button toggles to Stop while the agent runs and
   kills the runtime process tree (SIGTERM → grace → SIGKILL).
 

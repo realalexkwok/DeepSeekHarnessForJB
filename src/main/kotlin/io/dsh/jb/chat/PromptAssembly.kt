@@ -6,9 +6,9 @@ package io.dsh.jb.chat
  */
 enum class ComposerAction(val display: String) {
     ASK("Ask"),
-    EXECUTE("Execute"),
+    EXECUTE("Code"),
     PLAN("Plan"),
-    FIX("Fix"),
+    FIX("Debug"),
 }
 
 /** One `@`-mentioned project file resolved to its content (roadmap item 14). */

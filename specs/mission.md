@@ -20,7 +20,7 @@ in the spirit of the built-in AI agent (AI Assistant Agent mode / Gemini in Andr
 4. Edits arrive as diffs to review, apply, or reject inside the editor.
 5. Plan mode: explore read-only, present a plan, implement only after approval.
 6. Permissions: explicit approval for commands and out-of-workspace writes.
-7. Context actions: Ask / Explain / Fix on an editor selection.
+7. Context actions: Ask / Explain / Debug on an editor selection.
 
 ## Audiences
 - Developers who use DeepSeek Harness for AI coding, including vibe coding.

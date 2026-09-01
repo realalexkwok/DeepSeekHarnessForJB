@@ -87,7 +87,7 @@ import kotlinx.coroutines.launch
  * Roadmap item 5 chat transcript, with the roadmap item 6/10/11 composer pulled
  * forward (2026-08-27). The composer's bottom strip holds three TAB BUTTONS that
  * open POPUP MENUS (user feedback 2026-08-27): Context → checkable items Current
- * file + AGENTS.md; Context action → Ask / Execute / Plan / Fix (pending); Model →
+ * file + AGENTS.md; Context action → Ask / Code / Plan / Debug; Model →
  * Model + Effort radio submenus + Settings…. The submit icon sits right of the
  * buttons. Prompts route to the (model, effort)-keyed runtime pool.
  */
@@ -143,9 +143,9 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     private val contextFileItem = JCheckBoxMenuItem("Current file", true)
     private val contextAgentsItem = JCheckBoxMenuItem("AGENTS.md", true)
     private val askItem = JRadioButtonMenuItem("Ask")
-    private val executeItem = JRadioButtonMenuItem("Execute")
+    private val executeItem = JRadioButtonMenuItem("Code")
     private val planItem = JRadioButtonMenuItem("Plan")
-    private val fixItem = JRadioButtonMenuItem("Fix (pending)")
+    private val fixItem = JRadioButtonMenuItem("Debug")
     private val modelSubmenu = JMenu("Model")
     private val effortMenu = JMenu("Effort")
     private val customItem = JMenuItem("Custom…")
@@ -395,50 +395,11 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         border = JBUI.Borders.empty(2, 8)
     }
 
-    /** Three bottom tab buttons, each opening a popup menu on click (user feedback 2026-08-27). */
+    /** Three bottom tab buttons, each opening a Kilo-style searchable list popup (item 18). */
     private fun buildComposerTabs(): JComponent {
-        val contextMenu = JPopupMenu()
-        contextMenu.add(contextFileItem)
-        contextMenu.add(contextAgentsItem)
-        contextTab.addActionListener { contextMenu.show(contextTab, 0, contextTab.height) }
-
-        val actionMenu = JPopupMenu()
-        val actionGroup = ButtonGroup()
-        for (item in listOf(askItem, executeItem, planItem, fixItem)) {
-            actionGroup.add(item)
-            actionMenu.add(item)
-        }
-        askItem.addActionListener { actionSelected(ComposerAction.ASK) }
-        executeItem.addActionListener { actionSelected(ComposerAction.EXECUTE) }
-        planItem.addActionListener { actionSelected(ComposerAction.PLAN) }
-        actionTab.addActionListener {
-            // Re-assert the checks from the stored selection on every open, so the
-            // current action is always visibly checked in the popped list.
-            askItem.isSelected = currentAction == ComposerAction.ASK
-            executeItem.isSelected = currentAction == ComposerAction.EXECUTE
-            planItem.isSelected = currentAction == ComposerAction.PLAN
-            actionMenu.show(actionTab, 0, actionTab.height)
-        }
-
-        val modelMenu = JPopupMenu()
-        modelMenu.add(modelSubmenu)
-        modelMenu.add(effortMenu)
-        modelMenu.addSeparator()
-        modelMenu.add(settingsItem)
-        val effortGroup = ButtonGroup()
-        for ((level, item) in effortItems) {
-            effortGroup.add(item)
-            effortMenu.add(item)
-            item.addActionListener { effortSelected(level) }
-        }
-        customItem.addActionListener {
-            ShowSettingsUtil.getInstance().showSettingsDialog(project, DshSettingsConfigurable::class.java)
-        }
-        settingsItem.addActionListener {
-            ShowSettingsUtil.getInstance().showSettingsDialog(project, DshSettingsConfigurable::class.java)
-        }
-        modelTab.addActionListener { modelMenu.show(modelTab, 0, modelTab.height) }
-
+        contextTab.addActionListener { showPopup(contextTab, contextRows()) { row -> onContextPick(row) } }
+        actionTab.addActionListener { showPopup(actionTab, actionRows()) { row -> onActionPick(row) } }
+        modelTab.addActionListener { showPopup(modelTab, modelRows()) { row -> onModelPick(row) } }
         val strip = JPanel(BorderLayout(8, 0))
         val buttons = JPanel(FlowLayout(FlowLayout.LEFT, 2, 0))
         buttons.add(contextTab)
@@ -446,6 +407,87 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         buttons.add(modelTab)
         strip.add(buttons, BorderLayout.CENTER)
         return strip
+    }
+
+    /** Kilo-style: the selected row carries a bare tick in its OWN column, so
+     * row content stays aligned with or without the glyph. The tick column lives
+     * in the popup renderer; rows here only carry the boolean. */
+    private fun row(bold: String, plain: String, tick: Boolean) = PopupRow(bold, plain, tick)
+
+    private fun contextRows(): List<PopupRow> = listOf(
+        row("Current file", "attach the open editor file", contextFileItem.isSelected),
+        row("AGENTS.md", "workspace rules", contextAgentsItem.isSelected),
+    )
+
+    private fun onContextPick(row: PopupRow) {
+        when (row.bold) {
+            "Current file" -> {
+                contextFileItem.isSelected = !contextFileItem.isSelected
+                refreshContextChips()
+            }
+            "AGENTS.md" -> {
+                contextAgentsItem.isSelected = !contextAgentsItem.isSelected
+                refreshContextChips()
+            }
+        }
+    }
+
+    private fun actionRows(): List<PopupRow> = listOf(
+        row("Ask", "answer without modifying", currentAction == ComposerAction.ASK),
+        row("Code", "act on the request", currentAction == ComposerAction.EXECUTE),
+        row("Plan", "plan before applying", currentAction == ComposerAction.PLAN),
+        row("Debug", "diagnose and repair", currentAction == ComposerAction.FIX),
+    )
+
+    private fun onActionPick(row: PopupRow) {
+        val action = ComposerAction.entries.firstOrNull { it.display == row.bold } ?: return
+        actionSelected(action)
+    }
+
+    /** Group labels Model / Effort / Settings… are all bold. Model and Effort
+     * are plain headers (not pickable); Settings… is its OWN group label — not
+     * a row under Effort (host feedback 2026-09-01) — and still opens the
+     * settings page when picked. */
+    private fun modelRows(): List<PopupRow> {
+        val rows = mutableListOf<PopupRow>()
+        rows += PopupRow("Model", "", header = true)
+        for (id in modelIds) {
+            rows += row(ModelCatalog.displayNameFor(id), "", id == currentModelId())
+        }
+        rows += PopupRow("Effort", "", header = true)
+        for (level in EffortLevel.entries) {
+            rows += row(level.display, "", level.wire == DshSettingsState.getInstance().snapshot().effort)
+        }
+        rows += PopupRow("Settings…", "opens the settings page", header = true)
+        return rows
+    }
+
+    private fun onModelPick(row: PopupRow) {
+        if (row.bold == "Settings…") {
+            ShowSettingsUtil.getInstance().showSettingsDialog(project, DshSettingsConfigurable::class.java)
+            return
+        }
+        if (row.header) return
+        val effort = EffortLevel.entries.firstOrNull { it.display == row.bold }
+        if (effort != null) {
+            effortSelected(effort)
+            return
+        }
+        val id = modelIds.firstOrNull { ModelCatalog.displayNameFor(it) == row.bold }
+        if (id != null) modelSelected(id)
+    }
+
+    /** Item 18: a FRESH popup window per show — reuse leaked stale rows across
+    * tabs (all tabs showed the Context list, manual-test 2026-09-01). */
+    private var popup: PopupListWindow? = null
+
+    private fun showPopup(anchor: JComponent, rows: List<PopupRow>, handler: (PopupRow) -> Unit) {
+        val owner = SwingUtilities.getWindowAncestor(this) ?: return
+        popup?.dispose()
+        val win = PopupListWindow(owner, handler)
+        popup = win
+        logger.info("popup: firstRow='${rows.firstOrNull()}' size=${rows.size}")
+        win.show(anchor, rows)
     }
 
     private fun currentModelId(): String =
@@ -1216,6 +1258,8 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         flushTimer.stop()
         mentionWindow?.dispose()
         mentionWindow = null
+        popup?.dispose()
+        popup = null
         scope.cancel()
     }
 

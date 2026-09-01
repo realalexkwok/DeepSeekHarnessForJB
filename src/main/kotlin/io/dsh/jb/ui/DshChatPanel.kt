@@ -49,6 +49,7 @@ import com.intellij.openapi.editor.colors.EditorColorsListener
 import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.editor.colors.EditorColorsScheme
 import java.awt.BorderLayout
+import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Font
@@ -244,7 +245,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     private class ToolParts(
         val panel: JComponent,
+        val headerBlock: JComponent,
         val header: JBLabel,
+        val preview: JBLabel,
+        val body: JComponent,
         val argsArea: JBTextArea,
         val resultArea: JBTextArea,
         val errorLabel: JBLabel,
@@ -254,6 +258,12 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     ) {
         /** Parsed result-time diffs, or null when the card shows the plain result. */
         var diffs: List<FileChange>? = null
+        /** Item 21: cards are collapsed by default and NEVER auto-expand. */
+        var collapsed = true
+        /** Previous tool name — a name change re-collapses the card. */
+        var lastName: String? = null
+        var name: String = ""
+        var stateText: String = ""
     }
 
     init {
@@ -1174,7 +1184,16 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     private fun toolParts(row: ToolCardRow): ToolParts {
         val panel = rowShell()
+        // Item 21: the header block (arrow + name/state + one-line preview) is
+        // the click target; the body (controls + args + result) hides by default.
+        val headerBlock = JPanel(BorderLayout()).apply { isOpaque = false }
         val header = JBLabel().apply { font = style.headerFont }
+        val preview = JBLabel("").apply {
+            foreground = JBColor.GRAY
+            font = style.smallFont
+        }
+        headerBlock.add(header, BorderLayout.CENTER)
+        headerBlock.add(preview, BorderLayout.SOUTH)
         val argsArea = transcriptText(mono = true)
         val resultArea = transcriptText()
         val errorLabel = JBLabel("").apply {
@@ -1196,16 +1215,27 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val metaWrap = JPanel(BorderLayout())
         metaWrap.add(metaToggle, BorderLayout.NORTH)
         metaWrap.add(metaArea, BorderLayout.CENTER)
-        panel.add(header, BorderLayout.NORTH)
+        panel.add(headerBlock, BorderLayout.NORTH)
         panel.add(body, BorderLayout.CENTER)
         panel.add(metaWrap, BorderLayout.SOUTH)
+        val parts = ToolParts(
+            panel, headerBlock, header, preview, body,
+            argsArea, resultArea, errorLabel, diffButton, metaToggle, metaArea,
+        )
+        headerBlock.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        headerBlock.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                if (e.clickCount != 1) return
+                parts.collapsed = !parts.collapsed
+                syncToolBody(parts)
+            }
+        })
         metaToggle.addActionListener {
             val show = !metaArea.isVisible
             metaArea.isVisible = show
             metaToggle.text = if (show) "raw meta ▾" else "raw meta ▸"
             panel.revalidate()
         }
-        val parts = ToolParts(panel, header, argsArea, resultArea, errorLabel, diffButton, metaToggle, metaArea)
         diffButton.addActionListener {
             parts.diffs?.let { d ->
                 DshDiffDialog(project, File(project.basePath ?: "."), d).show()
@@ -1213,6 +1243,16 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         }
         parts.update(row)
         return parts
+    }
+
+    /** Item 21: mirror the collapsed state into the header arrow and the
+     * body/preview visibility. */
+    private fun syncToolBody(parts: ToolParts) {
+        parts.header.text = (if (parts.collapsed) "▸ " else "▾ ") + "⚙ ${parts.name} · ${parts.stateText}"
+        parts.body.isVisible = !parts.collapsed
+        parts.preview.isVisible = parts.collapsed
+        parts.panel.revalidate()
+        parts.panel.repaint()
     }
 
     private fun noticePanel(row: NoticeRow): StaticParts {
@@ -1253,13 +1293,19 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     }
 
     private fun ToolParts.update(row: ToolCardRow) {
-        header.text = when {
-            row.status == ToolCardStatus.RUNNING -> "⚙ ${row.name} · running…"
-            row.isError -> "⚙ ${row.name} · error"
-            else -> "⚙ ${row.name} · done"
+        // Item 21: a tool-name change re-collapses the card (never auto-expand).
+        if (lastName != null && lastName != row.name) collapsed = true
+        lastName = row.name
+        name = row.name
+        stateText = when {
+            row.status == ToolCardStatus.RUNNING -> "running…"
+            row.isError -> "error"
+            else -> "done"
         }
-        argsArea.text = prettyJson(row.arguments)
+        val prettyArgs = prettyJson(row.arguments)
+        argsArea.text = prettyArgs
         resultArea.text = row.resultText
+        preview.text = toolPreviewLine(row.resultText, prettyArgs)
         val errorText = row.errorName.orEmpty() + row.errorCode?.let { " ($it)" }.orEmpty()
         errorLabel.text = errorText
         errorLabel.isVisible = row.isError
@@ -1271,6 +1317,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         if (row.meta != null && metaArea.text.isEmpty()) {
             metaArea.text = prettyJson(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(row.meta))
         }
+        syncToolBody(this)
     }
 
     private fun renderTodos(todos: List<TodoItem>) {
@@ -1317,6 +1364,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                 }
                 is RowWidget.Tool -> {
                     widget.parts.header.font = newStyle.headerFont
+                    widget.parts.preview.font = newStyle.smallFont
                     widget.parts.argsArea.font = newStyle.editorFont
                     widget.parts.resultArea.font = newStyle.transcriptFont
                     widget.parts.metaArea.font = newStyle.editorFont

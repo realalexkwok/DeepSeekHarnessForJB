@@ -57,6 +57,7 @@ import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
+import java.awt.event.InputEvent
 import java.awt.event.HierarchyEvent
 import java.awt.event.HierarchyListener
 import java.awt.event.KeyAdapter
@@ -81,6 +82,8 @@ import javax.swing.JRadioButtonMenuItem
 import javax.swing.KeyStroke
 import javax.swing.JWindow
 import javax.swing.SwingUtilities
+import javax.swing.text.DefaultEditorKit
+import com.intellij.ui.components.TextComponentEmptyText
 import javax.swing.text.JTextComponent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -166,10 +169,25 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         isBorderPainted = false
     }
     private val input = JBTextArea().apply {
-        rows = 3
+        // Item 20: rows is only the pre-measurement fallback — the dynamic
+        // height (updateComposerHeight) takes over on the first layout pass.
+        rows = 1
         lineWrap = true
         wrapStyleWord = true
         border = BorderFactory.createEmptyBorder(6, 6, 6, 6)
+        // Item 20 follow-up (host feedback 2026-09-01): the borderless editor
+        // needs a placeholder — keep it visible while focused (Kilo's
+        // setShowPlaceholderWhenFocused behavior).
+        emptyText.setText(COMPOSER_HINT)
+        TextComponentEmptyText.setupPlaceholderVisibility(this)
+    }
+    // Item 20: no fixed height — updateComposerHeight measures the content
+    // and clamps it to [1 line, MAX_COMPOSER_LINES lines]. A field so the
+    // member function can resize it. Follow-up: the platform text-area outline
+    // (DarculaScrollPaneBorder) is stripped — ComposerShell owns the only frame.
+    private val inputScroll = JBScrollPane(input).apply {
+        border = null
+        viewportBorder = null
     }
 
     // Item 14: @-mention file picker — a NON-FOCUSABLE JWindow above the
@@ -288,14 +306,21 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         contextFileItem.addActionListener { refreshContextChips() }
         contextAgentsItem.addActionListener { refreshContextChips() }
         val composerBlock = JPanel(BorderLayout())
-        val inputScroll = JBScrollPane(input).apply { preferredSize = Dimension(0, 64) }
-        composerBlock.add(inputScroll, BorderLayout.CENTER)
+        // Item 20 follow-up: editor + tab row live in ONE Kilo-style shell;
+        // the focus ring (ComposerShell) surrounds the whole block.
+        val composerShell = ComposerShell { input.hasFocus() }
+        composerShell.add(inputScroll, BorderLayout.CENTER)
         val tabRow = JPanel(BorderLayout(8, 0))
         tabRow.border = JBUI.Borders.empty(4, 12, 6, 12)
         tabRow.add(buildComposerTabs(), BorderLayout.CENTER)
         tabRow.add(sendIcon, BorderLayout.EAST)
-        composerBlock.add(tabRow, BorderLayout.SOUTH)
+        composerShell.add(tabRow, BorderLayout.SOUTH)
+        composerBlock.add(composerShell, BorderLayout.CENTER)
         bottom.add(composerBlock, BorderLayout.SOUTH)
+        input.addFocusListener(object : FocusAdapter() {
+            override fun focusGained(e: FocusEvent) { composerShell.repaint() }
+            override fun focusLost(e: FocusEvent) { composerShell.repaint() }
+        })
         add(bottom, BorderLayout.SOUTH)
 
         add(scroll, BorderLayout.CENTER)
@@ -304,6 +329,9 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         input.actionMap.put("dsh-send", object : AbstractAction() {
             override fun actionPerformed(e: ActionEvent) { submit() }
         })
+        // Item 20: explicit Shift+Enter → newline (Enter keeps sending).
+        input.inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.SHIFT_DOWN_MASK), "dsh-newline")
+        input.actionMap.put("dsh-newline", DefaultEditorKit.InsertBreakAction())
         sendIcon.addActionListener { submit() }
         // Item 14: @-mention picker wiring (window created lazily once the
         // panel has a window ancestor).
@@ -345,9 +373,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             }
         })
         input.document.addDocumentListener(object : DocumentListener {
-            override fun insertUpdate(e: DocumentEvent) { updateMentions() }
-            override fun removeUpdate(e: DocumentEvent) { updateMentions() }
-            override fun changedUpdate(e: DocumentEvent) {}
+            override fun insertUpdate(e: DocumentEvent) {
+                updateMentions()
+                updateComposerHeight()
+            }
+            override fun removeUpdate(e: DocumentEvent) {
+                updateMentions()
+                updateComposerHeight()
+            }
+            override fun changedUpdate(e: DocumentEvent) { updateComposerHeight() }
         })
         // The scrollbar MODEL fires on EVERY value change — including mouse-wheel
         // scrolls, which AdjustmentListener never sees (it only fires on thumb
@@ -382,6 +416,8 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                 if (w != lastRowsWidth) {
                     lastRowsWidth = w
                     reflowAll()
+                    // Item 20: the composer re-wraps when the panel width changes.
+                    updateComposerHeight()
                 }
             }
         })
@@ -1295,6 +1331,8 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             }
         }
         reflowAll()
+        // Item 20: the composer font changed, so its line height did too.
+        updateComposerHeight()
         rowsPanel.revalidate()
         rowsPanel.repaint()
     }
@@ -1329,6 +1367,26 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         }
         rowsPanel.revalidate()
         rowsPanel.repaint()
+    }
+
+    /**
+     * Item 20: measure the composer's wrapped content via the View API (same
+     * technique as [sizeToContent]) and clamp the scroll-pane height to
+     * [1 line, MAX_COMPOSER_LINES lines]; beyond the cap the area scrolls.
+     */
+    private fun updateComposerHeight() {
+        val metrics = input.getFontMetrics(input.font)
+        val lineHeight = metrics.height.coerceAtLeast(1)
+        val w = input.width.coerceAtLeast(40)
+        val rootView = input.getUI().getRootView(input)
+        rootView.setSize(w.toFloat(), Int.MAX_VALUE.toFloat())
+        val content = rootView.getPreferredSpan(javax.swing.text.View.Y_AXIS).toInt()
+        val target = clampComposerHeight(content, lineHeight, MAX_COMPOSER_LINES)
+        val current = inputScroll.preferredSize
+        if (current == null || current.height != target + 8) {
+            inputScroll.preferredSize = Dimension(0, target + 8)
+            inputScroll.revalidate()
+        }
     }
 
     private fun sizeToContent(area: JBTextArea, width: Int) {
@@ -1382,5 +1440,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         private const val MAX_MENTION_CANDIDATES = 300
         /** Item 15: preview truncation for context chips. */
         private const val PREVIEW_BYTES = 2_000
+        /** Item 20 follow-up: composer placeholder hint. */
+        private const val COMPOSER_HINT = "Type here; use / or @, drop / paste files; ⏎ send, ⇧⏎ newline"
     }
 }

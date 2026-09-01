@@ -37,7 +37,7 @@
                     text="DSH: Explain Selection"/>
             <action id="io.dsh.jb.FixSelection"
                     class="io.dsh.jb.ui.FixSelectionAction"
-                    text="DSH: Fix Selection"/>
+                    text="DSH: Debug Selection"/>
         </group>
     </actions>
 </idea-plugin>

@@ -27,6 +27,8 @@ data class PopupRow(
     val plain: String = "",
     val tick: Boolean = false,
     val header: Boolean = false,
+    /** Opaque caller tag for pick routing (item 22: history session ids). */
+    val tag: Any? = null,
 ) {
     val searchText: String get() = bold + " " + plain
 }

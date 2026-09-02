@@ -84,6 +84,9 @@ High-level implementation order, one small phrase of work per item.
 22. Session history (grouped, added 2026-09-01): a history list of past
     sessions (persisted, resumable) in the current Chat mode; the design
     SHARES the store with a future Agent mode (one history, two modes).
+    Follow-up (host feedback 2026-09-01): Kilo-style history management —
+    icon-only New session/History header buttons, the history list INSIDE the
+    main window (not a popup), per-item Rename + Delete affordances.
 23. Inline diff editor (grouped, added 2026-09-01, user-selected): Kilo's
     virtual-file diff editor (CacheDiffRequestChainProcessor + per-file
     producers) replaces/upgrades the current diff dialog.
@@ -91,3 +94,6 @@ High-level implementation order, one small phrase of work per item.
     engine-side revert RPC with a short watchdog (Kilo's Revert banner).
 25. Auto-approve mode toggle (grouped, added 2026-09-01, user-selected): a
     composer quick-toggle for the permission mode (Kilo's autoApprove).
+    FINAL CHORE (user 2026-09-01, after the MVP items): re-pin the bundled DSH
+    carrier to dsh-v0.1.2-alpha.3 — the ambient checkout was upgraded; the dev
+    clone + carrier rebuild (item-12 pipeline) must follow once the MVP is done.

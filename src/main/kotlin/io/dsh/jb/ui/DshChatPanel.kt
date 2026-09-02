@@ -10,11 +10,13 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
+import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
 import io.dsh.jb.chat.AssistantRow
 import io.dsh.jb.chat.AssistantStatus
@@ -36,6 +38,7 @@ import io.dsh.jb.diff.FsDiffParser
 import io.dsh.jb.events.TodoItem
 import io.dsh.jb.events.TodoStatus
 import io.dsh.jb.runtime.DshConfigException
+import io.dsh.jb.history.HistoryStore
 import io.dsh.jb.runtime.EffortLevel
 import io.dsh.jb.runtime.RuntimeKey
 import io.dsh.jb.services.DshRuntimeService
@@ -66,10 +69,12 @@ import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.io.File
+import java.util.UUID
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 import javax.swing.AbstractAction
 import javax.swing.BorderFactory
+import javax.swing.Icon
 import javax.swing.BoxLayout
 import javax.swing.ButtonGroup
 import javax.swing.JButton
@@ -110,6 +115,30 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val logger = Logger.getInstance(DshChatPanel::class.java)
     private val mapper = jacksonObjectMapper()
+
+    // Item 22: per-project session history (Kilo model — project-scoped log +
+    // metadata index). Disabled when the project has no base path.
+    private val history: HistoryStore? = project.basePath
+        ?.takeIf { it.isNotBlank() }
+        ?.let { HistoryStore(File(it)) }
+    private var historyId: String = UUID.randomUUID().toString()
+    // Item 22 follow-up (host feedback 2026-09-01): the New Session / History /
+    // Settings chrome lives in the tool-window TITLE BAR (DshToolWindowFactory
+    // setTitleActions + setAdditionalGearActions), not in this header row.
+    // Item 22 follow-up: Kilo-style IN-WINDOW history view (Kilo HistoryPanel
+    // pattern — the CENTER swaps between transcript and history; Back restores).
+    private val historyView = JPanel(BorderLayout())
+    private val historyBackButton = iconButton(AllIcons.Actions.Back, "Back")
+    private val historySearch = JBTextField()
+    private val historyListPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
+    private val historyListScroll = JBScrollPane(historyListPanel).apply { border = null }
+    private var historyViewVisible = false
+    private val recentPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
+    private val recentScroll = JBScrollPane(recentPanel).apply { border = null }
+    private var emptyStateVisible = false
+    /** Item 22 (host feedback 2026-09-01): after New session the chat stays
+     * CLEAN — the Recent list appears only on a freshly opened panel. */
+    private var suppressEmptyState = false
 
     private val statusLabel = JBLabel("DSH agent: starting…")
     private val planBadge = JBLabel("PLAN MODE").apply {
@@ -472,6 +501,20 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             }
         })
         applyStyle(DshEditorStyle.current())
+        // Item 22 follow-up: assemble the in-window history view.
+        val historyTop = JPanel(BorderLayout(8, 0))
+        historyTop.border = JBUI.Borders.empty(4, 12, 4, 12)
+        historyTop.add(historyBackButton, BorderLayout.WEST)
+        historyTop.add(historySearch, BorderLayout.CENTER)
+        historyView.add(historyTop, BorderLayout.NORTH)
+        historyView.add(historyListScroll, BorderLayout.CENTER)
+        historyBackButton.addActionListener { backFromHistory() }
+        historySearch.document.addDocumentListener(object : DocumentListener {
+            override fun insertUpdate(e: DocumentEvent) { refreshHistoryList() }
+            override fun removeUpdate(e: DocumentEvent) { refreshHistoryList() }
+            override fun changedUpdate(e: DocumentEvent) {}
+        })
+        refreshHistoryUi()
     }
 
     private fun tabButton(label: String): JButton = JButton(label).apply {
@@ -678,6 +721,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         if (currentAction == ComposerAction.PLAN) {
             DshRuntimeService.getInstance(project).enqueueCommand("/plan")
         }
+        // Item 22: one history entry per conversation; the first prompt line
+        // becomes the entry title.
+        rotateHistoryIfNeeded()
+        history?.appendPrompt(historyId, text)
         val assembled = PromptAssembly.assemble(text, gatherContext())
         model.echoPrompt(assembled)
         scope.launch {
@@ -1008,6 +1055,12 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val follow = wasAtBottom
         events.forEach(model::onEvent)
         statuses.forEach(model::onStatus)
+        // Item 22: record the batch as ONE multi-line history write.
+        if (events.isNotEmpty()) {
+            runCatching {
+                history?.appendEvents(historyId, events.map { "event" to mapper.writeValueAsString(it) })
+            }
+        }
         render(model.state(), follow)
     }
 
@@ -1017,6 +1070,251 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
 
     private fun enqueueStatus(s: SessionStatusNotification) {
         pendingStatuses += s
+    }
+
+    /**
+     * Item 22: starts a FRESH conversation — stops any running turn (the next
+     * send lazily restarts the runtime), clears the transcript + composer,
+     * and rotates to a new history entry. Synchronous so no async notice can
+     * leak into the fresh transcript (Kilo NewSessionAction pattern).
+     */
+    internal fun startNewSession() {
+        if (model.state().running) {
+            scope.launch { DshRuntimeService.getInstance(project).interrupt() }
+            model.onStatus(SessionStatusNotification("", "idle"))
+        }
+        historyId = UUID.randomUUID().toString()
+        model.reset()
+        rowsPanel.removeAll()
+        rowWidgets.clear()
+        input.text = ""
+        suppressEmptyState = true
+        render(model.state(), followOverride = false)
+        refreshHistoryUi()
+        if (historyViewVisible) refreshHistoryList()
+        statusLabel.text = "DSH agent: idle"
+        logger.info("history: new session id=$historyId")
+    }
+
+    /** Item 22: one history entry per conversation — rotate only when the
+     * transcript was empty at send time and the current entry has content. */
+    private fun rotateHistoryIfNeeded() {
+        if (model.state().rows.isEmpty() && history?.hasContent(historyId) == true) {
+            historyId = UUID.randomUUID().toString()
+        }
+    }
+
+    /** Item 22: Kilo-style empty-state Recent sessions list + CENTER swap. */
+    private fun refreshHistoryUi() {
+        if (historyViewVisible) return
+        val entries = history?.entries() ?: emptyList()
+        val show = !suppressEmptyState && model.state().rows.isEmpty() && entries.isNotEmpty()
+        if (show) {
+            recentPanel.removeAll()
+            for (e in entries.take(RECENT_SESSIONS_LIMIT)) {
+                recentPanel.add(recentRow(e))
+            }
+            recentPanel.revalidate()
+            recentPanel.repaint()
+            if (!emptyStateVisible) {
+                remove(scroll)
+                add(recentScroll, BorderLayout.CENTER)
+                emptyStateVisible = true
+                revalidate()
+                repaint()
+            }
+        } else if (emptyStateVisible) {
+            remove(recentScroll)
+            add(scroll, BorderLayout.CENTER)
+            emptyStateVisible = false
+            revalidate()
+            repaint()
+        }
+    }
+
+    private fun recentRow(e: HistoryStore.Entry): JComponent {
+        val panel = JPanel(BorderLayout())
+        panel.border = JBUI.Borders.empty(6, 12)
+        val title = JBLabel(e.title.ifBlank { "Untitled session" }).apply { font = style.boldFont }
+        val sub = JBLabel(timeAgo(e.updated)).apply {
+            foreground = JBColor.GRAY
+            font = style.smallFont
+        }
+        panel.add(title, BorderLayout.NORTH)
+        panel.add(sub, BorderLayout.SOUTH)
+        panel.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        panel.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(ev: MouseEvent) {
+                if (ev.clickCount == 1) replaySession(e.id)
+            }
+        })
+        return panel
+    }
+
+    private fun timeAgo(t: Long): String {
+        val mins = (System.currentTimeMillis() - t) / 60_000
+        return when {
+            mins < 1 -> "just now"
+            mins < 60 -> "${mins}m ago"
+            mins < 60 * 24 -> "${mins / 60}h ago"
+            else -> "${mins / (60 * 24)}d ago"
+        }
+    }
+
+    /** Item 22 follow-up: Kilo-style icon-only chrome button. */
+    private fun iconButton(icon: Icon, tip: String): JButton = JButton(icon).apply {
+        toolTipText = tip
+        isContentAreaFilled = false
+        isBorderPainted = false
+        isFocusPainted = false
+        border = JBUI.Borders.empty(2, 2)
+    }
+
+    /** Item 22 follow-up: toggles the in-window history view (Kilo HistoryPanel). */
+    internal fun showHistoryView() {
+        if (historyViewVisible) {
+            backFromHistory()
+            return
+        }
+        remove(scroll)
+        remove(recentScroll)
+        emptyStateVisible = false
+        refreshHistoryList()
+        add(historyView, BorderLayout.CENTER)
+        historyViewVisible = true
+        revalidate()
+        repaint()
+    }
+
+    /** Item 22 follow-up: closes the history view and restores the chat. */
+    private fun backFromHistory() {
+        if (!historyViewVisible) return
+        remove(historyView)
+        historyViewVisible = false
+        emptyStateVisible = false
+        add(scroll, BorderLayout.CENTER)
+        refreshHistoryUi()
+        revalidate()
+        repaint()
+    }
+
+    /** Item 22 follow-up: rebuilds the history list (search-filtered). */
+    private fun refreshHistoryList() {
+        val entries = history?.entries() ?: emptyList()
+        val q = historySearch.text.trim().lowercase()
+        val filtered = if (q.isEmpty()) entries else entries.filter { it.title.lowercase().contains(q) }
+        historyListPanel.removeAll()
+        if (entries.isEmpty()) {
+            historyListPanel.add(JBLabel("No session history yet").apply {
+                border = JBUI.Borders.empty(8, 12)
+                foreground = JBColor.GRAY
+                font = style.smallFont
+            })
+        } else {
+            filtered.forEach { historyListPanel.add(historyRow(it)) }
+        }
+        historyListPanel.revalidate()
+        historyListPanel.repaint()
+    }
+
+    /** Item 22 follow-up: history-view row with Kilo-style Rename + Delete cells. */
+    private fun historyRow(e: HistoryStore.Entry): JComponent {
+        val panel = JPanel(BorderLayout())
+        panel.border = JBUI.Borders.empty(6, 12)
+        val titleLabel = JBLabel(e.title.ifBlank { "Untitled session" }).apply { font = style.boldFont }
+        val sub = JBLabel("${timeAgo(e.updated)} · click to open").apply {
+            foreground = JBColor.GRAY
+            font = style.smallFont
+        }
+        val actions = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply { isOpaque = false }
+        val renameBtn = iconButton(AllIcons.Actions.Edit, "Rename")
+        val deleteBtn = iconButton(AllIcons.Actions.GC, "Delete")
+        actions.add(renameBtn)
+        actions.add(deleteBtn)
+        panel.add(titleLabel, BorderLayout.NORTH)
+        panel.add(sub, BorderLayout.SOUTH)
+        panel.add(actions, BorderLayout.EAST)
+        panel.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        panel.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(ev: MouseEvent) {
+                if (ev.clickCount == 1) replaySession(e.id)
+            }
+        })
+        renameBtn.addActionListener { beginRename(panel, titleLabel, e) }
+        deleteBtn.addActionListener {
+            val title = e.title.ifBlank { "Untitled session" }
+            val ok = Messages.showYesNoDialog(
+                project,
+                "Delete \"$title\" from local history?",
+                "Delete session?",
+                Messages.getWarningIcon(),
+            )
+            if (ok == Messages.YES) {
+                history?.delete(e.id)
+                refreshHistoryList()
+                refreshHistoryUi()
+            }
+        }
+        return panel
+    }
+
+    /** Item 22 follow-up: inline row rename (Kilo's inline balloon simplified
+     * to an in-row field; Enter/blur commits, Escape cancels). */
+    private fun beginRename(panel: JPanel, titleLabel: JBLabel, e: HistoryStore.Entry) {
+        val field = JBTextField(e.title)
+        var done = false
+        fun commit() {
+            if (done) return
+            done = true
+            val t = field.text.trim()
+            if (t.isNotBlank()) history?.rename(e.id, t)
+            refreshHistoryList()
+        }
+        field.addActionListener { commit() }
+        field.addFocusListener(object : FocusAdapter() {
+            override fun focusLost(ev: FocusEvent) { commit() }
+        })
+        field.inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "dsh-rename-cancel")
+        field.actionMap.put("dsh-rename-cancel", object : AbstractAction() {
+            override fun actionPerformed(ev: ActionEvent) {
+                if (done) return
+                done = true
+                refreshHistoryList()
+            }
+        })
+        panel.remove(titleLabel)
+        panel.add(field, BorderLayout.NORTH)
+        panel.revalidate()
+        panel.repaint()
+        field.requestFocusInWindow()
+        field.selectAll()
+    }
+
+    /** Item 22: replays a stored session through the same fold + widget pipeline. */
+    private fun replaySession(id: String) {
+        if (historyViewVisible) backFromHistory()
+        historyId = id
+        model.reset()
+        rowsPanel.removeAll()
+        rowWidgets.clear()
+        var replayed = 0
+        for (line in history?.lines(id) ?: emptyList()) {
+            when (line.kind) {
+                "prompt" -> {
+                    model.echoPrompt(line.payload)
+                    replayed++
+                }
+                "event" -> runCatching {
+                    val n = mapper.readValue(line.payload, SessionEventNotification::class.java)
+                    model.onEvent(n)
+                    replayed++
+                }
+            }
+        }
+        logger.info("history: replay id=$id lines=$replayed")
+        render(model.state(), followOverride = false)
+        refreshHistoryUi()
+        SwingUtilities.invokeLater { scroll.verticalScrollBar.value = 0 }
     }
 
     private fun render(state: TranscriptState, followOverride: Boolean? = null) {
@@ -1096,6 +1394,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                 }
             }
         }
+        refreshHistoryUi()
     }
 
     /**
@@ -1490,5 +1789,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         private const val PREVIEW_BYTES = 2_000
         /** Item 20 follow-up: composer placeholder hint. */
         private const val COMPOSER_HINT = "Type here; use / or @, drop / paste files; ⏎ send, ⇧⏎ newline"
+        /** Item 22: Kilo's RecentSessions.LIMIT. */
+        private const val RECENT_SESSIONS_LIMIT = 5
     }
 }

@@ -24,6 +24,7 @@ import io.dsh.jb.events.MalformedEventData
 import io.dsh.jb.events.MaxTokensEnd
 import io.dsh.jb.events.ParentCancel
 import io.dsh.jb.events.PlanModeEvent
+import io.dsh.jb.chat.ReasoningRow
 import io.dsh.jb.events.RawCancelCause
 import io.dsh.jb.events.RawContentBlock
 import io.dsh.jb.events.RawTurnEndReason
@@ -49,6 +50,8 @@ import io.dsh.jb.events.UnknownEventData
 import io.dsh.jb.events.UsageChunk
 import io.dsh.jb.events.UserCancel
 import io.dsh.jb.events.UserMessageEvent
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import io.dsh.jb.diff.FsDiffParser
 import io.dsh.jb.protocol.SessionEventNotification
 import io.dsh.jb.protocol.SessionStatusNotification
 import java.util.concurrent.CopyOnWriteArrayList
@@ -71,6 +74,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) {
 
+    private val mapper = jacksonObjectMapper()
     private val lock = Any()
     private val rows = ArrayList<TranscriptRow>()
     private var todos: List<TodoItem> = emptyList()
@@ -88,6 +92,10 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
     private var streamSeq = 0L
     private var noticeSeq = 0L
     private val pendingEchos = ArrayDeque<String>()
+    /** Item 23 (host round 4): the reasoning text accumulated before the next
+     * tool/call — the harness has no per-tool reasoning field, so the model
+     * snapshots the assistant stream. */
+    private var lastThinking = ""
 
     /** Current immutable snapshot. */
     fun state(): TranscriptState = state
@@ -107,6 +115,7 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
         streamingAssistantId = null
         noKeyGuidanceShown = false
         pendingEchos.clear()
+        lastThinking = ""
         publishLocked()
     }
 
@@ -158,6 +167,7 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
                     is ReasoningDeltaChunk -> {
                         val r = streamingRow(data.turn, data.step)
                         replaceRow(r.id) { it.copy(thinking = it.thinking + chunk.text) }
+                        lastThinking += chunk.text
                     }
                     is UsageChunk -> {
                         val r = streamingRow(data.turn, data.step)
@@ -198,14 +208,23 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
                 if (existing != null) replaceRow(existing.id) { row } else rows += row
                 streamingAssistantId = null
             }
-            is ToolCallEvent -> rows += ToolCardRow(
-                id = "tool-" + data.callId,
-                callId = data.callId,
-                name = data.name,
-                arguments = data.arguments,
-                turn = data.turn,
-                step = data.step,
-            )
+            is ToolCallEvent -> {
+                rows += ToolCardRow(
+                    id = "tool-" + data.callId,
+                    callId = data.callId,
+                    name = data.name,
+                    arguments = data.arguments,
+                    turn = data.turn,
+                    step = data.step,
+                    reasoning = lastThinking,
+                )
+                // Item 23 (host round 6): the reasoning becomes a STANDALONE
+                // card right after the tool card it belongs to.
+                if (lastThinking.isNotBlank()) {
+                    rows += ReasoningRow("reasoning-" + data.callId, lastThinking)
+                }
+                lastThinking = ""
+            }
             is ToolResultEvent -> {
                 val callId = (data.message.source as? ToolSource)?.callId
                     ?: (data.message.content.firstOrNull() as? ToolResultBlock)?.toolCallId
@@ -226,8 +245,30 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
                     errorName = data.error?.name,
                     errorCode = data.error?.code,
                     meta = data.meta,
+                    reasoning = existing?.reasoning ?: "",
                 )
-                if (idx >= 0) rows[idx] = settled else rows += settled
+                // Item 23 (host round 7): MULTI-CHANGE SPLIT — a result with
+                // N>1 diffs becomes N single-change cards (write looks like
+                // edit: one header link + stat per card, no link lists).
+                val parsed = FsDiffParser.parse(data.meta)
+                if (parsed != null && parsed.size > 1) {
+                    val cards = parsed.mapIndexed { i, c ->
+                        val oneMeta = mapper.createObjectNode().apply {
+                            val arr = putArray("diffs")
+                            val o = arr.addObject()
+                            o.put("path", c.path)
+                            if (c.oldText != null) o.put("oldText", c.oldText) else o.putNull("oldText")
+                            o.put("newText", c.newText)
+                        }
+                        settled.copy(id = "tool-" + callId + "-" + i, meta = oneMeta)
+                    }
+                    if (idx >= 0) {
+                        rows[idx] = cards.first()
+                        rows.addAll(idx + 1, cards.drop(1))
+                    } else {
+                        rows += cards
+                    }
+                } else if (idx >= 0) rows[idx] = settled else rows += settled
             }
             is TurnStartEvent -> {
                 closeStreaming()

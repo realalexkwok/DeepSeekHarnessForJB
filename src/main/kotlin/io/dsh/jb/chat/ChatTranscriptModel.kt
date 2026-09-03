@@ -131,6 +131,36 @@ class ChatTranscriptModel(private val eventMapper: EventMapper = EventMapper()) 
         id
     }
 
+    /** Item 24 (replanned): renders one pending permission ask as a card. */
+    fun addPermission(approvalId: String, toolName: String, reason: String?): String = synchronized(lock) {
+        val rowId = "permission-" + approvalId
+        rows.removeAll { it is PermissionRow && it.id == rowId }
+        rows += PermissionRow(rowId, approvalId, toolName, reason)
+        publishLocked()
+        rowId
+    }
+
+    /** Item 24 (replanned): removes the card once the user decided (the
+     * approval/decided notice remains the audit trail). */
+    fun resolvePermission(rowId: String) = synchronized(lock) {
+        rows.removeAll { it is PermissionRow && it.id == rowId }
+        publishLocked()
+    }
+
+    /** Item 24 (host round): renders one generic ask_user_question as a card. */
+    fun addQuestion(questionId: String, header: String?, question: String, options: List<String>, multiple: Boolean): String = synchronized(lock) {
+        val rowId = "question-" + questionId
+        rows.removeAll { it is QuestionRow && it.id == rowId }
+        rows += QuestionRow(rowId, questionId, header, question, options, multiple)
+        publishLocked()
+        rowId
+    }
+
+    fun resolveQuestion(rowId: String) = synchronized(lock) {
+        rows.removeAll { it is QuestionRow && it.id == rowId }
+        publishLocked()
+    }
+
     /** A local note (e.g. a send failure) rendered as a plain notice row. */
     fun notice(text: String): String = synchronized(lock) {
         val id = "notice-${++noticeSeq}"

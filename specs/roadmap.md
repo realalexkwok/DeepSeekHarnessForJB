@@ -90,10 +90,15 @@ High-level implementation order, one small phrase of work per item.
 23. Inline diff editor (grouped, added 2026-09-01, user-selected): Kilo's
     virtual-file diff editor (CacheDiffRequestChainProcessor + per-file
     producers) replaces/upgrades the current diff dialog.
-24. Revert / undo agent edits (grouped, added 2026-09-01, user-selected):
-    engine-side revert RPC with a short watchdog (Kilo's Revert banner).
+24. Permission management — REPLANNED 2026-09-03 (user cancelled the
+    revert/undo item): Kilo-aligned permission UX — permission-mode selection,
+    approval dialogs/cards, and auto-approve rule management; the item-25
+    auto-approve quick-toggle is folded into this scope unless the interview
+    says otherwise.
 25. Auto-approve mode toggle (grouped, added 2026-09-01, user-selected): a
     composer quick-toggle for the permission mode (Kilo's autoApprove).
+    NOTE 2026-09-03: likely folded into the replanned item 24 — confirm in the
+    item-24 interview.
     FINAL CHORE (user 2026-09-01, after the MVP items): re-pin the bundled DSH
     carrier to dsh-v0.1.2-alpha.3 — the ambient checkout was upgraded; the dev
     clone + carrier rebuild (item-12 pipeline) must follow once the MVP is done.

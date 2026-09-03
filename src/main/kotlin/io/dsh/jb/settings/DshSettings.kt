@@ -14,14 +14,23 @@ import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import com.intellij.util.xmlb.XmlSerializerUtil
+import io.dsh.jb.permission.PermissionLevel
+import io.dsh.jb.permission.PermissionRules
 import io.dsh.jb.runtime.NodeResolver
+import java.awt.BorderLayout
+import java.awt.Dimension
+import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
+import javax.swing.BoxLayout
 import javax.swing.JButton
+import javax.swing.JCheckBox
 import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JPasswordField
+import com.intellij.ui.components.JBScrollPane
+import com.intellij.ui.components.JBTextField
 
 /**
  * Platform-free settings values used to resolve the runtime config (roadmap item 10,
@@ -122,6 +131,16 @@ class DshSettingsConfigurable : Configurable {
         foreground = JBColor.GRAY
     }
 
+    // Item 24 (replanned): permission management section — edits apply LIVE.
+    private val autoApprove = JCheckBox("Approve every permission prompt automatically (same as the composer shield)")
+    private val toolCombo = JComboBox(arrayOf("bash", "read", "write", "edit", "glob", "grep"))
+    private val levelCombo = JComboBox(arrayOf("allow", "ask", "deny"))
+    private val patternToolCombo = JComboBox(arrayOf("bash", "read", "write", "edit", "glob", "grep"))
+    private val patternField = JBTextField(14)
+    private val patternLevelCombo = JComboBox(arrayOf("allow", "ask", "deny"))
+    private val patternsPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
+    private val rulesScroll = JBScrollPane(patternsPanel).apply { preferredSize = Dimension(0, 110) }
+
     companion object {
         /** Shown when a key exists; typing over it replaces the stored key. */
         private const val KEY_MASK = "********"
@@ -137,6 +156,13 @@ class DshSettingsConfigurable : Configurable {
             FileChooserDescriptorFactory.createSingleFolderDescriptor(),
         )
         clearKey.addActionListener { clearRequested = true }
+        // Item 24 (replanned): permission edits apply immediately.
+        autoApprove.addActionListener { PermissionSettings.setAutoApprove(autoApprove.isSelected) }
+        toolCombo.addActionListener {
+            val current = PermissionSettings.loadRules().levels
+                .firstOrNull { it.tool == toolCombo.selectedItem as? String }?.level
+            if (current != null) levelCombo.selectedItem = current.wire
+        }
     }
 
     override fun getDisplayName(): String = "DeepSeek Harness"
@@ -166,9 +192,91 @@ class DshSettingsConfigurable : Configurable {
         addRow(6, "Permission mode:", permissionMode)
         addRow(7, "", permissionHint)
         addRow(8, "", nodeStatus)
+        // Item 24 (replanned): permission management rows.
+        autoApprove.isSelected = PermissionSettings.getAutoApprove()
+        addRow(9, "Auto-approve:", autoApprove)
+        addRow(10, "Tool permission levels:", toolLevelRow())
+        addRow(11, "Pattern rules:", patternRow())
+        addRow(12, "", rulesScroll)
+        refreshRulesList()
         apiKey.text = if (DshApiKey.get().isNullOrBlank()) "" else KEY_MASK
         refreshNodeStatus()
         return panel
+    }
+
+    /** Item 24 (replanned): tool-level setter row (applies immediately). */
+    private fun toolLevelRow(): JComponent {
+        val row = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+        val set = JButton("Set")
+        set.addActionListener {
+            val tool = toolCombo.selectedItem as? String ?: return@addActionListener
+            val level = PermissionLevel.entries.firstOrNull { it.wire == levelCombo.selectedItem as? String } ?: PermissionLevel.ASK
+            PermissionSettings.saveRules(PermissionSettings.loadRules().withToolLevel(tool, level))
+            refreshRulesList()
+        }
+        row.add(toolCombo)
+        row.add(levelCombo)
+        row.add(set)
+        return row
+    }
+
+    /** Item 24 (replanned): pattern add row (applies immediately). */
+    private fun patternRow(): JComponent {
+        val row = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+        val add = JButton("Add")
+        add.addActionListener {
+            val tool = patternToolCombo.selectedItem as? String ?: return@addActionListener
+            val pattern = patternField.text.trim()
+            val level = PermissionLevel.entries.firstOrNull { it.wire == patternLevelCombo.selectedItem as? String } ?: PermissionLevel.ASK
+            if (pattern.isNotEmpty()) {
+                PermissionSettings.saveRules(
+                    PermissionSettings.loadRules().withPattern(
+                        io.dsh.jb.permission.PatternRule(tool, pattern, level),
+                    ),
+                )
+                patternField.text = ""
+                refreshRulesList()
+            }
+        }
+        row.add(JBLabel("tool:"))
+        row.add(patternToolCombo)
+        row.add(JBLabel("pattern:"))
+        row.add(patternField)
+        row.add(patternLevelCombo)
+        row.add(add)
+        return row
+    }
+
+    /** Item 24 (replanned): lists levels + patterns with per-row removal. */
+    private fun refreshRulesList() {
+        val rules = PermissionSettings.loadRules()
+        patternsPanel.removeAll()
+        for (l in rules.levels) {
+            patternsPanel.add(
+                JBLabel(l.tool + ": " + l.level.wire).apply {
+                    foreground = JBColor.GRAY
+                    border = JBUI.Borders.empty(2, 0)
+                },
+            )
+        }
+        for (p in rules.patterns) {
+            val row = JPanel(BorderLayout(6, 0)).apply { isOpaque = false }
+            row.add(
+                JBLabel(p.tool + ": " + p.pattern + " → " + p.level.wire).apply {
+                    foreground = JBColor.GRAY
+                },
+                BorderLayout.CENTER,
+            )
+            val remove = JButton("Remove")
+            remove.addActionListener {
+                PermissionSettings.saveRules(rules.withoutPattern(p.tool, p.pattern))
+                refreshRulesList()
+            }
+            row.add(remove, BorderLayout.EAST)
+            patternsPanel.add(row)
+        }
+        patternsPanel.revalidate()
+        patternsPanel.repaint()
     }
 
     /** Resolves node off the EDT and updates the status label with version + path. */

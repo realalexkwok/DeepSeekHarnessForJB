@@ -52,6 +52,14 @@ data class ToolCardRow(
     val errorName: String? = null,
     val errorCode: String? = null,
     val meta: JsonNode? = null,
+    /** Item 23 (host round 4): the reasoning accumulated before this tool call. */
+    val reasoning: String = "",
+) : TranscriptRow()
+
+/** Item 23 (host round 6): standalone reasoning card under a tool/call card. */
+data class ReasoningRow(
+    override val id: String,
+    val text: String,
 ) : TranscriptRow()
 
 enum class NoticeKind {

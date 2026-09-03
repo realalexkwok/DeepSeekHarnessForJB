@@ -1,6 +1,7 @@
 package io.dsh.jb.chat
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import io.dsh.jb.diff.FsDiffParser
 import io.dsh.jb.events.CompletedEnd
 import io.dsh.jb.events.MaxTokensEnd
 import io.dsh.jb.events.RawTurnEndReason
@@ -113,6 +114,28 @@ class ChatTranscriptModelTest {
         assertEquals(ToolCardStatus.DONE, card.status)
         assertEquals("c9", card.callId)
         assertEquals("late", card.resultText)
+    }
+
+    @Test
+    fun `multi-change tool results split into one card per change`() {
+        val m = ChatTranscriptModel()
+        m.onEvent(event("tool/call", """{"turn":1,"step":1,"callId":"c1","name":"write","arguments":"{\"file_path\":\"a.txt\"}"}"""))
+        m.onEvent(
+            event(
+                "tool/result",
+                """{"turn":1,"step":1,"message":{"id":"r1","role":"user","content":[{"type":"tool-result","toolCallId":"c1","content":[{"type":"text","text":"ok"}],"isError":false}],"source":{"kind":"tool","callId":"c1"}},"meta":{"diffs":[{"path":"a.txt","oldText":null,"newText":"A"},{"path":"b.txt","oldText":"old","newText":"B"}]}}""",
+            ),
+        )
+        val cards = m.state().rows.filterIsInstance<ToolCardRow>()
+        assertEquals(2, cards.size)
+        assertEquals("tool-c1-0", cards[0].id)
+        assertEquals("tool-c1-1", cards[1].id)
+        val firstDiffs = FsDiffParser.parse(cards[0].meta)
+        val secondDiffs = FsDiffParser.parse(cards[1].meta)
+        assertEquals(1, firstDiffs?.size)
+        assertEquals("a.txt", firstDiffs?.first()?.path)
+        assertEquals(1, secondDiffs?.size)
+        assertEquals("b.txt", secondDiffs?.first()?.path)
     }
 
     @Test

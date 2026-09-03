@@ -26,6 +26,7 @@ import io.dsh.jb.chat.NoticeKind
 import io.dsh.jb.chat.NoticeRow
 import io.dsh.jb.chat.PromptAssembly
 import io.dsh.jb.chat.PromptContext
+import io.dsh.jb.chat.ReasoningRow
 import io.dsh.jb.chat.ToolCardRow
 import io.dsh.jb.chat.ToolCardStatus
 import io.dsh.jb.chat.TranscriptRow
@@ -33,8 +34,15 @@ import io.dsh.jb.chat.TranscriptState
 import io.dsh.jb.protocol.SessionEventNotification
 import io.dsh.jb.protocol.SessionStatusNotification
 import io.dsh.jb.chat.UserRow
+import io.dsh.jb.diff.DIFF_MAX_LINES
+import io.dsh.jb.diff.DiffLine
+import io.dsh.jb.diff.DiffOp
 import io.dsh.jb.diff.FileChange
 import io.dsh.jb.diff.FsDiffParser
+import io.dsh.jb.diff.DiffRow
+import io.dsh.jb.diff.diffLines
+import io.dsh.jb.diff.gutterRows
+import io.dsh.jb.diff.patchLineCount
 import io.dsh.jb.events.TodoItem
 import io.dsh.jb.events.TodoStatus
 import io.dsh.jb.runtime.DshConfigException
@@ -47,13 +55,40 @@ import io.dsh.jb.settings.DshSettingsConfigurable
 import io.dsh.jb.settings.DshSettingsState
 import io.dsh.jb.settings.ModelCatalog
 import io.dsh.jb.settings.ModelInfo
+import com.intellij.diff.DiffContentFactory
+import com.intellij.diff.DiffDialogHints
+import com.intellij.diff.DiffManager
+import com.intellij.diff.chains.DiffRequestProducer
+import com.intellij.diff.chains.SimpleDiffRequestChain
+import com.intellij.diff.requests.DiffRequest
+import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.ide.ui.LafManagerListener
+import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.diff.DiffColors
 import com.intellij.openapi.editor.colors.EditorColorsListener
 import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.editor.colors.EditorColorsScheme
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.editor.TextAnnotationGutterProvider
+import com.intellij.openapi.editor.colors.ColorKey
+import com.intellij.openapi.editor.colors.EditorFontType
+import com.intellij.openapi.editor.ex.EditorEx
+import com.intellij.openapi.editor.markup.HighlighterLayer
+import com.intellij.openapi.editor.markup.HighlighterTargetArea
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.ui.popup.Balloon
+import com.intellij.openapi.ui.popup.JBPopupFactory
+import com.intellij.openapi.util.UserDataHolder
+import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VfsUtil
+import com.intellij.ui.EditorTextField
+import com.intellij.ui.HyperlinkLabel
+import com.intellij.ui.awt.RelativePoint
 import java.awt.BorderLayout
+import java.awt.Color
 import java.awt.Cursor
 import java.awt.Dimension
+import java.awt.Point
 import java.awt.FlowLayout
 import java.awt.Font
 import java.awt.event.ActionEvent
@@ -74,6 +109,7 @@ import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 import javax.swing.AbstractAction
 import javax.swing.BorderFactory
+import javax.swing.event.HyperlinkEvent
 import javax.swing.Icon
 import javax.swing.BoxLayout
 import javax.swing.ButtonGroup
@@ -156,6 +192,17 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     }
     private val todoToggle = JButton("Todos (0) ▾")
     private val todoList = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
+    // Item 23 (host round 4): bulk decision row above the Todos section.
+    private val bulkActionsRow = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 4)).apply {
+        isOpaque = false
+        isVisible = false
+    }
+    private val acceptAllBtn = JButton("Accept All", AllIcons.Actions.Commit).apply {
+        toolTipText = "Keep every pending change (they are already applied)"
+    }
+    private val rejectAllBtn = JButton("Reject All", AllIcons.Actions.Cancel).apply {
+        toolTipText = "Undo every pending change"
+    }
 
     // Item 15: Kilo-style context chips above the composer, with a collapsible
     // preview (collapsed by default; X removes the context).
@@ -253,6 +300,20 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         class Tool(val parts: ToolParts) : RowWidget() {
             override fun component() = parts.panel
         }
+        class Reasoning(val parts: ReasoningParts) : RowWidget() {
+            override fun component() = parts.panel
+        }
+    }
+
+    /** Item 23 (host round 6): the standalone "Reasoning" card under a tool card. */
+    private class ReasoningParts(
+        val panel: JComponent,
+        val headerBlock: JComponent,
+        val arrow: JBLabel,
+        val bodyArea: JBTextArea,
+        val body: JComponent,
+    ) {
+        var collapsed = true
     }
 
     private class StaticParts(
@@ -275,15 +336,19 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     private class ToolParts(
         val panel: JComponent,
         val headerBlock: JComponent,
-        val header: JBLabel,
-        val preview: JBLabel,
+        val header: JPanel,
+        val nameLabel: JBLabel,
+        val expandBtn: JBLabel,
+        val preview: JPanel,
         val body: JComponent,
         val argsArea: JBTextArea,
         val resultArea: JBTextArea,
+        val bodyCenter: JPanel,
+        val diffSection: JPanel,
         val errorLabel: JBLabel,
-        val diffButton: JButton,
         val metaToggle: JButton,
         val metaArea: JBTextArea,
+        val metaWrap: JPanel,
     ) {
         /** Parsed result-time diffs, or null when the card shows the plain result. */
         var diffs: List<FileChange>? = null
@@ -293,7 +358,14 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         var lastName: String? = null
         var name: String = ""
         var stateText: String = ""
+        var argumentsJson: String = ""
+        var resultText: String = ""
+        /** Item 23 (host round): per-file decisions survive section rebuilds. */
+        val decisions: MutableMap<String, DiffDecision> = HashMap()
     }
+
+    /** Item 23 (host round): Accept = keep (already applied); Reject = undone. */
+    private enum class DiffDecision { ACCEPTED, REJECTED }
 
     init {
         // Item 19: re-snapshot typography on GLOBAL scheme changes. Evidence
@@ -336,7 +408,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             todoToggle.text = "Todos (${model.state().todos.size}) " + if (todoList.isVisible) "▾" else "▸"
             todoWrap.revalidate()
         }
-        bottom.add(todoWrap, BorderLayout.NORTH)
+        // Item 23 (host round 4): Accept All / Reject All sit above the Todos.
+        bulkActionsRow.add(acceptAllBtn)
+        bulkActionsRow.add(rejectAllBtn)
+        acceptAllBtn.addActionListener { bulkDecide(true) }
+        rejectAllBtn.addActionListener { bulkDecide(false) }
+        val todoArea = JPanel(BorderLayout())
+        todoArea.add(bulkActionsRow, BorderLayout.NORTH)
+        todoArea.add(todoWrap, BorderLayout.CENTER)
+        bottom.add(todoArea, BorderLayout.NORTH)
         // Item 15: context chips + preview sit between todos and the composer.
         val contextWrap = JPanel(BorderLayout())
         contextWrap.add(contextChips, BorderLayout.NORTH)
@@ -1064,6 +1144,48 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         render(model.state(), follow)
     }
 
+    /** Item 23 (host round 4): the bulk row shows while any card has pending changes. */
+    private fun refreshBulkActions() {
+        bulkActionsRow.isVisible = pendingDecisions().isNotEmpty()
+        bulkActionsRow.revalidate()
+        bulkActionsRow.repaint()
+    }
+
+    private fun pendingDecisions(): List<Pair<ToolParts, FileChange>> =
+        rowWidgets.values
+            .filterIsInstance<RowWidget.Tool>()
+            .flatMap { w ->
+                w.parts.diffs.orEmpty()
+                    .filter { w.parts.decisions[it.path] == null }
+                    .map { w.parts to it }
+            }
+
+    /** Item 23 (host round 4): Accept All dismisses every pending pair; Reject
+     * All reverts every pending change on disk, then dismisses them too. */
+    private fun bulkDecide(accept: Boolean) {
+        var n = 0
+        for (widget in rowWidgets.values) {
+            if (widget !is RowWidget.Tool) continue
+            val parts = widget.parts
+            val changes = parts.diffs ?: continue
+            for (change in changes) {
+                if (parts.decisions[change.path] != null) continue
+                if (accept) {
+                    parts.decisions[change.path] = DiffDecision.ACCEPTED
+                } else if (revertChange(change)) {
+                    parts.decisions[change.path] = DiffDecision.REJECTED
+                } else {
+                    continue
+                }
+                n++
+            }
+            parts.rebuildDiffSection()
+        }
+        model.notice(if (accept) "Accepted $n change(s)" else "Rejected $n change(s) — undone")
+        render(model.state())
+        refreshBulkActions()
+    }
+
     private fun enqueueEvent(e: SessionEventNotification) {
         pendingEvents += e
     }
@@ -1395,6 +1517,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             }
         }
         refreshHistoryUi()
+        refreshBulkActions()
     }
 
     /**
@@ -1433,7 +1556,55 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         is UserRow -> RowWidget.Static(userPanel(row))
         is AssistantRow -> RowWidget.Assistant(assistantParts(row))
         is ToolCardRow -> RowWidget.Tool(toolParts(row))
+        is ReasoningRow -> RowWidget.Reasoning(reasoningParts(row))
         is NoticeRow -> RowWidget.Static(noticePanel(row))
+    }
+
+    /** Item 23 (host round 6): expandable "Reasoning" card (Kilo ReasoningView
+     * look — hover tint, whole-header click, ">" / "∨" pure-text arrow). */
+    private fun reasoningParts(row: ReasoningRow): ReasoningParts {
+        val panel = rowShell()
+        val headerBlock = JPanel(BorderLayout()).apply { isOpaque = false }
+        val title = JBLabel("Reasoning").apply {
+            font = style.headerFont
+            foreground = JBColor.GRAY
+        }
+        val arrow = JBLabel(">").apply {
+            foreground = JBColor.GRAY
+            font = style.smallFont
+            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        }
+        headerBlock.add(title, BorderLayout.CENTER)
+        headerBlock.add(arrow, BorderLayout.EAST)
+        val bodyArea = transcriptText().apply {
+            foreground = JBColor.GRAY
+            text = row.text
+        }
+        val body = JPanel(BorderLayout()).apply { isVisible = false }
+        body.add(bodyArea, BorderLayout.CENTER)
+        panel.add(headerBlock, BorderLayout.NORTH)
+        panel.add(body, BorderLayout.CENTER)
+        val parts = ReasoningParts(panel, headerBlock, arrow, bodyArea, body)
+        headerBlock.addMouseListener(object : MouseAdapter() {
+            override fun mouseEntered(e: MouseEvent) {
+                headerBlock.isOpaque = true
+                headerBlock.background = JBUI.CurrentTheme.ActionButton.hoverBackground()
+                headerBlock.repaint()
+            }
+            override fun mouseExited(e: MouseEvent) {
+                headerBlock.isOpaque = false
+                headerBlock.repaint()
+            }
+            override fun mouseClicked(e: MouseEvent) {
+                if (e.clickCount != 1) return
+                parts.collapsed = !parts.collapsed
+                parts.arrow.text = if (parts.collapsed) ">" else "∨"
+                parts.body.isVisible = !parts.collapsed
+                parts.panel.revalidate()
+                parts.panel.repaint()
+            }
+        })
+        return parts
     }
 
     private fun userPanel(row: UserRow): StaticParts {
@@ -1486,11 +1657,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         // Item 21: the header block (arrow + name/state + one-line preview) is
         // the click target; the body (controls + args + result) hides by default.
         val headerBlock = JPanel(BorderLayout()).apply { isOpaque = false }
-        val header = JBLabel().apply { font = style.headerFont }
-        val preview = JBLabel("").apply {
-            foreground = JBColor.GRAY
-            font = style.smallFont
-        }
+        // Item 23 (host round): the preview line may hold the clickable
+        // basename link (single-file cards) or the change-count hint.
+        val preview = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply { isOpaque = false }
+        // Item 23 (host round 3): the header line holds the tool name plus
+        // the single-file link (Kilo title + subtitle look); state words are
+        // gone (fail = red tool name).
+        val header = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+        val nameLabel = JBLabel().apply { font = style.headerFont }
+        header.add(nameLabel)
         headerBlock.add(header, BorderLayout.CENTER)
         headerBlock.add(preview, BorderLayout.SOUTH)
         val argsArea = transcriptText(mono = true)
@@ -1499,17 +1674,24 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             foreground = JBColor(0xc0392b, 0xe06c75)
             font = style.smallFont
         }
-        val diffButton = JButton("Diff").apply { isVisible = false }
         val metaToggle = JButton("raw meta ▸")
         val metaArea = transcriptText(mono = true).apply { isVisible = false }
         val body = JPanel(BorderLayout())
         val controls = JPanel(BorderLayout(8, 0))
-        controls.add(diffButton, BorderLayout.WEST)
         controls.add(errorLabel, BorderLayout.EAST)
         body.add(controls, BorderLayout.NORTH)
         val content = JPanel(BorderLayout())
         content.add(argsArea, BorderLayout.NORTH)
-        content.add(resultArea, BorderLayout.CENTER)
+        // Item 23: the body CENTER swaps between the plain result and the
+        // inline diff section (Kilo: edit tools render the diff as the body).
+        val bodyCenter = JPanel(BorderLayout())
+        bodyCenter.add(resultArea, BorderLayout.CENTER)
+        content.add(bodyCenter, BorderLayout.CENTER)
+        val diffSection = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            border = JBUI.Borders.emptyTop(4)
+            isVisible = false
+        }
         body.add(content, BorderLayout.CENTER)
         val metaWrap = JPanel(BorderLayout())
         metaWrap.add(metaToggle, BorderLayout.NORTH)
@@ -1517,14 +1699,113 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         panel.add(headerBlock, BorderLayout.NORTH)
         panel.add(body, BorderLayout.CENTER)
         panel.add(metaWrap, BorderLayout.SOUTH)
+        // Item 23 (host round 4A): expansion via the right-end ARROW only —
+        // the header block stays inert (file links own their clicks).
+        // Item 23 (host feedback 2026-09-02): a REAL bordered button — the
+        // bare glyph version was invisible at the far-right edge.
+        // Item 23 (host round 4): PURE TEXT arrow — a gray label whose clicks
+        // bubble into the whole-header toggle.
+        val expandBtn = JBLabel(">").apply {
+            toolTipText = "Expand"
+            foreground = JBColor.GRAY
+            font = style.smallFont
+            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        }
+        headerBlock.add(expandBtn, BorderLayout.EAST)
         val parts = ToolParts(
-            panel, headerBlock, header, preview, body,
-            argsArea, resultArea, errorLabel, diffButton, metaToggle, metaArea,
+            panel, headerBlock, header, nameLabel, expandBtn, preview, body,
+            argsArea, resultArea, bodyCenter, diffSection, errorLabel, metaToggle, metaArea, metaWrap,
         )
-        headerBlock.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        // Item 23 (host round 2): Kilo PartHeader behavior — hover fills the
+        // header background; ANY header click toggles the card EXCEPT on the
+        // file links (they open files). The arrow button is visual only here;
+        // its clicks bubble to this listener and toggle once.
+        // Item 23 (host round 6): hover-preview bubble (scrollable, short
+        // delay, dismissed on mouse-out). bash/glob show the response; edit
+        // shows the diff body like the expanded card.
+        fun previewBubbleContent(): JComponent? = when (parts.name) {
+            "bash", "glob", "grep" -> {
+                val area = transcriptText(mono = true).apply { text = parts.resultText }
+                JBScrollPane(area).apply {
+                    preferredSize = Dimension(480, 320)
+                    border = null
+                }
+            }
+            "edit", "write" -> {
+                val ds = parts.diffs
+                if (ds.isNullOrEmpty()) {
+                    null
+                } else if (ds.size == 1) {
+                    val lines = diffLines(ds[0].oldText, ds[0].newText)
+                    val body = lines.joinToString("\n") { it.text }
+                    val field = EditorTextField(body).apply {
+                        isViewer = true
+                        setOneLineMode(false)
+                        font = style.editorFont
+                    }
+                    field.addSettingsProvider { ed ->
+                        highlightPatch(ed as? EditorEx ?: return@addSettingsProvider, lines)
+                    }
+                    JBScrollPane(field).apply {
+                        preferredSize = Dimension(480, 320)
+                        border = null
+                    }
+                } else {
+                    val sb = StringBuilder()
+                    for (c in ds) {
+                        sb.append(c.path).append('\n')
+                        sb.append(diffLines(c.oldText, c.newText).joinToString("\n") { it.text })
+                        sb.append("\n\n")
+                    }
+                    val area = transcriptText(mono = true).apply { text = sb.toString() }
+                    JBScrollPane(area).apply {
+                        preferredSize = Dimension(480, 320)
+                        border = null
+                    }
+                }
+            }
+            else -> null
+        }
+        var hoverTimer: javax.swing.Timer? = null
+        var bubble: Balloon? = null
         headerBlock.addMouseListener(object : MouseAdapter() {
+            override fun mouseEntered(e: MouseEvent) {
+                headerBlock.isOpaque = true
+                headerBlock.background = JBUI.CurrentTheme.ActionButton.hoverBackground()
+                headerBlock.repaint()
+                hoverTimer?.stop()
+                hoverTimer = javax.swing.Timer(500) {
+                    hoverTimer = null
+                    bubble?.hide()
+                    previewBubbleContent()?.let { content ->
+                        bubble = JBPopupFactory.getInstance()
+                            .createBalloonBuilder(content)
+                            .setBlockClicksThroughBalloon(true)
+                            .setRequestFocus(false)
+                            .setHideOnClickOutside(true)
+                            .createBalloon()
+                        bubble?.show(
+                            RelativePoint(headerBlock, Point(0, headerBlock.height)),
+                            Balloon.Position.below,
+                        )
+                    }
+                }.apply {
+                    isRepeats = false
+                    start()
+                }
+            }
+            override fun mouseExited(e: MouseEvent) {
+                hoverTimer?.stop()
+                hoverTimer = null
+                bubble?.hide()
+                bubble = null
+                headerBlock.isOpaque = false
+                headerBlock.repaint()
+            }
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount != 1) return
+                val src = e.source as? JComponent ?: return
+                if (src.getClientProperty("dsh-file-link") == true) return
                 parts.collapsed = !parts.collapsed
                 syncToolBody(parts)
             }
@@ -1535,23 +1816,411 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             metaToggle.text = if (show) "raw meta ▾" else "raw meta ▸"
             panel.revalidate()
         }
-        diffButton.addActionListener {
-            parts.diffs?.let { d ->
-                DshDiffDialog(project, File(project.basePath ?: "."), d).show()
-            }
-        }
         parts.update(row)
         return parts
     }
 
-    /** Item 21: mirror the collapsed state into the header arrow and the
+    /** Item 21/23: mirror the collapsed state into the arrow button and the
      * body/preview visibility. */
     private fun syncToolBody(parts: ToolParts) {
-        parts.header.text = (if (parts.collapsed) "▸ " else "▾ ") + "⚙ ${parts.name} · ${parts.stateText}"
+        syncHeader(parts)
+        parts.expandBtn.text = if (parts.collapsed) ">" else "∨"
+        parts.expandBtn.toolTipText = if (parts.collapsed) "Expand" else "Collapse"
         parts.body.isVisible = !parts.collapsed
         parts.preview.isVisible = parts.collapsed
         parts.panel.revalidate()
         parts.panel.repaint()
+    }
+
+    /** Item 23 (host round 3): tool name + single-file link on the header line;
+     * 'done'/'failed' words are gone — failures paint the name red. */
+    private fun syncHeader(parts: ToolParts) {
+        parts.nameLabel.text = "⚙ " + parts.name + if (parts.stateText == "running…") " · running…" else ""
+        parts.nameLabel.foreground = if (parts.stateText == "error") JBColor(0xc0392b, 0xe06c75) else null
+        parts.header.removeAll()
+        parts.header.add(parts.nameLabel)
+        val ds = parts.diffs
+        if (ds != null && ds.size == 1) {
+            // Item 23 (host round 5): the diff title (link + "+N −M") lives on
+            // the header line for single-change cards.
+            parts.header.add(fileLinkLabel(ds[0].path))
+            val hl = diffLines(ds[0].oldText, ds[0].newText)
+            val adds = hl.count { it.op == DiffOp.INSERT }
+            val dels = hl.count { it.op == DiffOp.DELETE }
+            parts.header.add(JBLabel("+" + adds + " −" + dels).apply {
+                foreground = JBColor.GRAY
+                font = style.smallFont
+            })
+        } else if (ds == null && parts.name == "read") {
+            readFilePath(parts.argumentsJson)?.let { parts.header.add(fileLinkLabel(it)) }
+        }
+        parts.header.revalidate()
+        parts.header.repaint()
+    }
+
+    /** Item 23: rebuilds the inline diff section (Kilo look: per-file patch
+     * editors with +/- highlighting; over the cap → placeholder + tab link). */
+    private fun ToolParts.rebuildDiffSection() {
+        bodyCenter.removeAll()
+        diffSection.removeAll()
+        val changes = diffs
+        logger.info("diff: section tool=${name} changes=${changes?.size ?: "none"} collapsed=${collapsed}")
+        if (changes == null) {
+            argsArea.isVisible = true
+            // Item 23 (host round 2): read cards get no raw-meta button.
+            metaWrap.isVisible = name != "read"
+            val wrapper = JPanel(BorderLayout())
+            if (name == "write" || name == "edit") {
+                // Item 23 (host feedback 2026-09-02): explain WHY there is no
+                // Accept/Reject instead of silently showing the plain result.
+                wrapper.add(
+                    JBLabel("No diff metadata — the harness reported no file changes, so there is nothing to Accept/Reject.").apply {
+                        foreground = JBColor.GRAY
+                        font = style.smallFont
+                        border = JBUI.Borders.empty(4, 0, 4, 0)
+                    },
+                    BorderLayout.NORTH,
+                )
+            }
+            wrapper.add(resultArea, BorderLayout.CENTER)
+            bodyCenter.add(wrapper, BorderLayout.CENTER)
+            resultArea.isVisible = true
+            diffSection.isVisible = false
+            bodyCenter.revalidate()
+            bodyCenter.repaint()
+            return
+        }
+        // Item 23 (host round): expanded DIFF cards show ONLY the diff content —
+        // request JSON and the raw-meta toggle are hidden.
+        argsArea.isVisible = false
+        metaWrap.isVisible = false
+        resultArea.isVisible = false
+        diffSection.isVisible = true
+        if (patchLineCount(changes) > DIFF_MAX_LINES) {
+            diffSection.add(overflowPanel(changes))
+        } else {
+            for (change in changes) {
+                runCatching { diffSection.add(diffFilePanel(change)) }
+                    .onFailure { logger.warn("diff: section build failed for ${change.path}", it) }
+            }
+        }
+        bodyCenter.add(diffSection, BorderLayout.CENTER)
+        diffSection.revalidate()
+        diffSection.repaint()
+        bodyCenter.revalidate()
+        bodyCenter.repaint()
+    }
+
+    /** Item 23 (host round): collapsed preview — single-file cards show the
+     * clickable basename link; multi-file cards show the count hint. */
+    private fun ToolParts.buildPreview(row: ToolCardRow, prettyArgs: String) {
+        preview.removeAll()
+        val ds = diffs
+        if (ds == null) {
+            // Item 23 (host round 4): the header line already carries the link
+            // for single-file cards and read cards — the preview keeps only
+            // the gray snippet/hint.
+            preview.add(JBLabel(toolPreviewLine(row.resultText, prettyArgs)).apply {
+                foreground = JBColor.GRAY
+                font = style.smallFont
+            })
+        } else if (ds.size == 1) {
+            preview.add(JBLabel("click to expand").apply {
+                foreground = JBColor.GRAY
+                font = style.smallFont
+            })
+        } else {
+            // Item 23 (host round 3): multi-file cards list EVERY file link on
+            // the collapsed preview (the aggregate write card can't be split
+            // into one card per change without a model change).
+            for (p in ds) preview.add(fileLinkLabel(p.path))
+            preview.add(JBLabel("(" + ds.size + " files — click to expand)").apply {
+                foreground = JBColor.GRAY
+                font = style.smallFont
+            })
+        }
+        preview.revalidate()
+        preview.repaint()
+    }
+
+    /** Item 23 (host round 2): the read tool's file_path argument, or null. */
+    private fun readFilePath(argumentsJson: String): String? = try {
+        mapper.readTree(argumentsJson).path("file_path").takeIf { it.isTextual }?.asText()?.takeIf { it.isNotBlank() }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Item 23 (host round 3): underlined basename link — hover balloon with the
+     * full path, click opens the file. */
+    private fun fileLinkLabel(path: String): JBLabel {
+        val label = JBLabel("<html><u>${escapeHtml(path.substringAfterLast('/'))}</u></html>").apply {
+            font = style.boldFont
+            foreground = JBUI.CurrentTheme.Link.Foreground.ENABLED
+            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        }
+        label.putClientProperty("dsh-file-link", true)
+        var balloon: Balloon? = null
+        label.addMouseListener(object : MouseAdapter() {
+            override fun mouseEntered(e: MouseEvent) {
+                balloon?.hide()
+                balloon = JBPopupFactory.getInstance()
+                    .createBalloonBuilder(JBLabel(path))
+                    .setHideOnClickOutside(false)
+                    .setBlockClicksThroughBalloon(true)
+                    .setShowCallout(true)
+                    .createBalloon()
+                balloon?.show(RelativePoint(label, Point(0, label.height)), Balloon.Position.below)
+            }
+            override fun mouseExited(e: MouseEvent) {
+                balloon?.hide()
+                balloon = null
+            }
+            override fun mouseClicked(e: MouseEvent) {
+                if (e.clickCount == 1) openFile(path)
+            }
+        })
+        return label
+    }
+
+    /** Item 23: one file's inline patch section — basename link + patch editor
+     * + the Accept/Reject/Undo-Reject state machine. */
+    private fun ToolParts.diffFilePanel(change: FileChange): JComponent {
+        val panel = JPanel(BorderLayout(0, 4))
+        panel.border = JBUI.Borders.empty(0, 0, 8, 0)
+        val headerRow = JPanel(BorderLayout(8, 0)).apply { isOpaque = false }
+        // Item 23 (host round 3): BASENAME link — hover shows the full path
+        // in a balloon, click opens the file. No full path text in the body.
+        val title = fileLinkLabel(change.path)
+        val lines = diffLines(change.oldText, change.newText)
+        val adds = lines.count { it.op == DiffOp.INSERT }
+        val dels = lines.count { it.op == DiffOp.DELETE }
+        val stat = JBLabel("+" + adds + " −" + dels).apply {
+            foreground = JBColor.GRAY
+            font = style.smallFont
+        }
+        val titleWrap = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+        // Item 23 (host round 5): single-change cards carry the title on the
+        // CARD HEADER; the section keeps its own title only for multi-change
+        // cards (each file needs its identity).
+        if ((diffs?.size ?: 1) > 1) {
+            titleWrap.add(title)
+            titleWrap.add(stat)
+            headerRow.add(titleWrap, BorderLayout.WEST)
+        }
+        val actions = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply { isOpaque = false }
+        when (decisions[change.path]) {
+            DiffDecision.ACCEPTED -> Unit // buttons dismissed (the change is already applied)
+            DiffDecision.REJECTED -> {
+                val undo = JButton("Undo Reject", AllIcons.Actions.Rollback).apply {
+                    toolTipText = "Re-apply the change"
+                }
+                actions.add(undo)
+                undo.addActionListener {
+                    decisions.remove(change.path)
+                    if (applyChange(change)) {
+                        model.notice("Re-applied ${change.path}")
+                        render(model.state())
+                    }
+                    rebuildDiffSection()
+                }
+            }
+            null -> {
+                val acceptBtn = JButton("Accept", AllIcons.Actions.Commit).apply {
+                    toolTipText = "Keep the change (the harness already applied it)"
+                }
+                val rejectBtn = JButton("Reject", AllIcons.Actions.Cancel).apply {
+                    toolTipText = "Undo the change"
+                }
+                actions.add(acceptBtn)
+                actions.add(rejectBtn)
+                acceptBtn.addActionListener {
+                    decisions[change.path] = DiffDecision.ACCEPTED
+                    rebuildDiffSection()
+                }
+                rejectBtn.addActionListener {
+                    if (revertChange(change)) {
+                        decisions[change.path] = DiffDecision.REJECTED
+                        model.notice("Rejected ${change.path} — change undone")
+                        render(model.state())
+                    }
+                    rebuildDiffSection()
+                }
+            }
+        }
+        headerRow.add(actions, BorderLayout.EAST)
+        // Item 23 (host round 3): Kilo's pure-diff body — no ---/+++/@@
+        // header lines, no leading +/- markers; the ops drive the colors and
+        // the gutter instead.
+        val body = lines.joinToString("\n") { it.text }
+        val field = EditorTextField(body).apply {
+            isViewer = true
+            setOneLineMode(false)
+            font = style.editorFont
+        }
+        // The editor is created lazily — decorate it inside the settings
+        // provider so backgrounds + gutter apply whenever it materializes.
+        field.addSettingsProvider { ed ->
+            highlightPatch(ed as? EditorEx ?: return@addSettingsProvider, lines)
+        }
+        panel.add(headerRow, BorderLayout.NORTH)
+        panel.add(
+            JBScrollPane(field).apply {
+                preferredSize = Dimension(0, 140)
+                border = null
+            },
+            BorderLayout.CENTER,
+        )
+        return panel
+    }
+
+    /** Item 23: Kilo-style +/- line highlighting (colored backgrounds) on
+     * the patch editor, plus the old/new line-number gutter. */
+    private fun highlightPatch(editor: EditorEx, lines: List<DiffLine>) {
+        val doc = editor.document
+        lines.forEachIndexed { idx, line ->
+            val attrs = when (line.op) {
+                DiffOp.INSERT -> DiffColors.DIFF_INSERTED.defaultAttributes
+                DiffOp.DELETE -> DiffColors.DIFF_DELETED.defaultAttributes
+                DiffOp.EQUAL -> null
+            } ?: return@forEachIndexed
+            editor.markupModel.addRangeHighlighter(
+                doc.getLineStartOffset(idx),
+                doc.getLineEndOffset(idx),
+                HighlighterLayer.FIRST,
+                attrs,
+                HighlighterTargetArea.EXACT_RANGE,
+            )
+        }
+        installDiffGutter(editor, gutterRows(lines))
+    }
+
+    /** Item 23 (host round 1): old/new line numbers in the diff gutter. */
+    private fun installDiffGutter(editor: EditorEx, rows: List<DiffRow>) {
+        editor.settings.isLineNumbersShown = false
+        editor.gutter.closeAllAnnotations()
+        editor.gutter.registerTextAnnotation(DiffGutterProvider(rows))
+    }
+
+    /** Item 23 (host round): Reject undoes the change — oldText back, or the
+     * file is DELETED for creations. Workspace-confined like applyChange. */
+    private fun revertChange(change: FileChange): Boolean {
+        val base = File(project.basePath ?: ".").canonicalFile
+        val target = File(base, change.path).canonicalFile
+        val basePrefix = base.path + File.separator
+        if (target != base && !target.path.startsWith(basePrefix)) {
+            model.notice("Reject refused: ${change.path} is outside the workspace")
+            render(model.state())
+            return false
+        }
+        return try {
+            WriteCommandAction.runWriteCommandAction(project) {
+                val old = change.oldText
+                if (old == null) {
+                    val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target)
+                    if (vf != null) vf.delete(project)
+                } else {
+                    target.parentFile?.mkdirs()
+                    var vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target)
+                    if (vf == null) {
+                        val parent = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target.parentFile)
+                            ?: throw IllegalStateException("cannot resolve parent: ${target.parentFile}")
+                        vf = parent.createChildData(project, target.name)
+                    }
+                    VfsUtil.saveText(vf, old)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            model.notice("Failed to reject ${change.path}: ${e.message}")
+            render(model.state())
+            false
+        }
+    }
+
+    /** Item 23 (host round 3): opens the change's file in the editor. */
+    private fun openFile(path: String) {
+        val base = File(project.basePath ?: ".").canonicalFile
+        val raw = File(path)
+        val target = (if (raw.isAbsolute) raw else File(base, path)).canonicalFile
+        val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target)
+        if (vf == null) {
+            model.notice("File not found: ${target.path}")
+            render(model.state())
+            return
+        }
+        FileEditorManager.getInstance(project).openFile(vf, true)
+    }
+
+    private fun escapeHtml(text: String): String =
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    /** Item 23: writes one change workspace-confined (the item-7 semantic —
+     * Kilo's CLI writes files, ours apply on the IDE side). */
+    private fun applyChange(change: FileChange): Boolean {
+        val base = File(project.basePath ?: ".").canonicalFile
+        val target = File(base, change.path).canonicalFile
+        val basePrefix = base.path + File.separator
+        if (target != base && !target.path.startsWith(basePrefix)) {
+            model.notice("Apply refused: ${change.path} is outside the workspace")
+            render(model.state())
+            return false
+        }
+        return try {
+            WriteCommandAction.runWriteCommandAction(project) {
+                target.parentFile?.mkdirs()
+                var vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target)
+                if (vf == null) {
+                    val parent = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target.parentFile)
+                        ?: throw IllegalStateException("cannot resolve parent: ${target.parentFile}")
+                    vf = parent.createChildData(project, target.name)
+                }
+                VfsUtil.saveText(vf, change.newText)
+            }
+            model.notice("Applied ${change.path}")
+            render(model.state())
+            true
+        } catch (e: Exception) {
+            model.notice("Failed to apply ${change.path}: ${e.message}")
+            render(model.state())
+            false
+        }
+    }
+
+    /** Item 23: Kilo's over-cap placeholder (DIFF_MAX_LINES) with the tab link. */
+    private fun overflowPanel(changes: List<FileChange>): JComponent {
+        val panel = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply { isOpaque = false }
+        panel.add(
+            JBLabel("Diff too large (${patchLineCount(changes)} lines) — ").apply {
+                foreground = JBColor.GRAY
+                font = style.smallFont
+            },
+        )
+        val link = HyperlinkLabel("open in a diff tab")
+        link.addHyperlinkListener { e ->
+            if (e.eventType == HyperlinkEvent.EventType.ACTIVATED) openDiffTab(changes)
+        }
+        panel.add(link)
+        return panel
+    }
+
+    /** Item 23: opens the over-cap diff in the PLATFORM multi-file viewer. */
+    private fun openDiffTab(changes: List<FileChange>) {
+        val producers = changes.map { change ->
+            object : DiffRequestProducer {
+                override fun getName(): String = change.path
+                override fun process(context: UserDataHolder, indicator: ProgressIndicator): DiffRequest {
+                    val factory = DiffContentFactory.getInstance()
+                    val before = change.oldText?.let { factory.create(project, it) } ?: factory.createEmpty()
+                    val after = factory.create(project, change.newText)
+                    return SimpleDiffRequest(change.path, before, after, change.path, change.path)
+                }
+            }
+        }
+        DiffManager.getInstance().showDiff(
+            project,
+            SimpleDiffRequestChain.fromProducers(producers),
+            DiffDialogHints.DEFAULT,
+        )
     }
 
     private fun noticePanel(row: NoticeRow): StaticParts {
@@ -1601,17 +2270,20 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
             row.isError -> "error"
             else -> "done"
         }
+        argumentsJson = row.arguments
+        resultText = row.resultText
         val prettyArgs = prettyJson(row.arguments)
         argsArea.text = prettyArgs
         resultArea.text = row.resultText
-        preview.text = toolPreviewLine(row.resultText, prettyArgs)
+        buildPreview(row, prettyArgs)
         val errorText = row.errorName.orEmpty() + row.errorCode?.let { " ($it)" }.orEmpty()
         errorLabel.text = errorText
         errorLabel.isVisible = row.isError
         val parsed = FsDiffParser.parse(row.meta)
         diffs = parsed ?: fallbackDiff(row.name, row.arguments)
-        diffButton.isVisible = diffs != null
-        diffs?.let { diffButton.text = "Diff (${it.size} file${if (it.size == 1) "" else "s"})" }
+        // Item 23 diagnostics (2026-09-02): why a card has/hasn't got Accept/Reject.
+        logger.info("diff: tool=${row.name} meta=${row.meta != null} parsed=${parsed?.size ?: "none"} diffs=${diffs?.size ?: "none"}")
+        rebuildDiffSection()
         metaToggle.isVisible = row.meta != null
         if (row.meta != null && metaArea.text.isEmpty()) {
             metaArea.text = prettyJson(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(row.meta))
@@ -1662,18 +2334,21 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                     widget.parts.usage.font = newStyle.smallFont
                 }
                 is RowWidget.Tool -> {
-                    widget.parts.header.font = newStyle.headerFont
-                    widget.parts.preview.font = newStyle.smallFont
+                    widget.parts.nameLabel.font = newStyle.headerFont
                     widget.parts.argsArea.font = newStyle.editorFont
                     widget.parts.resultArea.font = newStyle.transcriptFont
                     widget.parts.metaArea.font = newStyle.editorFont
                     widget.parts.errorLabel.font = newStyle.smallFont
+                    widget.parts.rebuildDiffSection()
                 }
                 is RowWidget.Static -> {
                     widget.parts.header?.font = newStyle.headerFont
                     var textFont = if (widget.parts.small) newStyle.smallFont else newStyle.transcriptFont
                     if (widget.parts.hint != Font.PLAIN) textFont = textFont.deriveFont(widget.parts.hint)
                     widget.parts.text.font = textFont
+                }
+                is RowWidget.Reasoning -> {
+                    widget.parts.bodyArea.font = newStyle.transcriptFont
                 }
             }
         }
@@ -1709,6 +2384,7 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                     sizeToContent(widget.parts.resultArea, width)
                     sizeToContent(widget.parts.metaArea, width)
                 }
+                is RowWidget.Reasoning -> sizeToContent(widget.parts.bodyArea, width)
                 is RowWidget.Static -> Unit
             }
         }
@@ -1792,4 +2468,37 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         /** Item 22: Kilo's RecentSessions.LIMIT. */
         private const val RECENT_SESSIONS_LIMIT = 5
     }
+}
+
+/** Item 23 (host round 1): two-column old/new line numbers in the diff gutter
+ * (Kilo's DiffGutter, reimplemented). */
+private const val FIGURE = '\u2007'
+
+private class DiffGutterProvider(private val rows: List<DiffRow>) : TextAnnotationGutterProvider {
+    private val oldWidth = width { it.old }
+    private val newWidth = width { it.new }
+
+    override fun getLineText(line: Int, editor: Editor): String? {
+        val row = rows.getOrNull(line) ?: return null
+        return "${col(row.old, oldWidth)}$FIGURE${col(row.new, newWidth)}$FIGURE$FIGURE"
+    }
+
+    override fun getToolTip(line: Int, editor: Editor): String? = null
+
+    override fun getStyle(line: Int, editor: Editor): EditorFontType = EditorFontType.PLAIN
+
+    override fun getColor(line: Int, editor: Editor): ColorKey? = null
+
+    override fun getBgColor(line: Int, editor: Editor): Color? = null
+
+    override fun gutterClosed() = Unit
+
+    override fun getPopupActions(line: Int, editor: Editor): List<AnAction>? = null
+
+    override fun useMargin(): Boolean = false
+
+    private fun width(pick: (DiffRow) -> Int?): Int =
+        rows.mapNotNull(pick).maxOrNull()?.toString()?.length ?: 1
+
+    private fun col(value: Int?, width: Int): String = value?.toString().orEmpty().padStart(width, FIGURE)
 }

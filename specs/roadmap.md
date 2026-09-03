@@ -95,10 +95,13 @@ High-level implementation order, one small phrase of work per item.
     approval dialogs/cards, and auto-approve rule management; the item-25
     auto-approve quick-toggle is folded into this scope unless the interview
     says otherwise.
-25. Auto-approve mode toggle (grouped, added 2026-09-01, user-selected): a
-    composer quick-toggle for the permission mode (Kilo's autoApprove).
-    NOTE 2026-09-03: likely folded into the replanned item 24 — confirm in the
-    item-24 interview.
-    FINAL CHORE (user 2026-09-01, after the MVP items): re-pin the bundled DSH
-    carrier to dsh-v0.1.2-alpha.3 — the ambient checkout was upgraded; the dev
-    clone + carrier rebuild (item-12 pipeline) must follow once the MVP is done.
+25. Auto-approve mode toggle (grouped, added 2026-09-01, user-selected):
+    FOLDED into item 24 (verified there) — the composer shield toggle shipped
+    with permission management.
+    FINAL CHORE (updated 2026-09-03): re-pin the bundled DSH carrier to the
+    LATEST tag — now dsh-v0.1.2-rc.1 (the alpha.3 plan is superseded). The
+    dev clone moves to rc.1; per-platform carrier exes + ripgrep sidecar
+    rebuild through the item-12 pipeline (Linux built here, macOS built by the
+    user with written instructions); compatibility (SDK protocol + bridge
+    answerer patch) verified by the e2e suite; pinned-version references
+    updated.

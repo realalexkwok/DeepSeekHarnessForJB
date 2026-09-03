@@ -6,7 +6,7 @@ import java.io.File
  * Item 12: locates and extracts the embedded packaged runtime for the current
  * platform. The plugin jar ships `runtime/<os>-<arch>/` resources produced by
  * the upstream pkg/SEA pipeline (scripts/build-exe-for-python-sdk.ts at the
- * pinned harness tag dsh-v0.1.2-alpha.1). The first start extracts them into a
+ * pinned harness tag dsh-v0.1.2-rc.1). The first start extracts them into a
  * versioned cache, ripgrep sidecar BESIDE the executable (the harness spawns it
  * relative to the exe), idempotently (dsh-cline's ensurePluginInstalled pattern).
  * Pure JVM — headless-testable.
@@ -14,7 +14,7 @@ import java.io.File
 object BundledRuntimeResolver {
 
     /** Cache layout version; bump when the embedded runtime artifact changes. */
-    const val RUNTIME_VERSION = "0.1.2-alpha.1"
+    const val RUNTIME_VERSION = "0.1.2-rc.1"
 
     /** The resource subdir for the current platform, or null when unsupported. */
     fun platformDir(): String? {

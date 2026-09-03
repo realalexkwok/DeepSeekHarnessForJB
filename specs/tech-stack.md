@@ -17,13 +17,18 @@
   session-event vocabulary.
 
 ## DSH side (embedded runtime)
-- Verified baseline: dsh-v0.1.2-alpha.1 (2026-08-28). The SDK runtime is the main
-  CLI's built-in `sdk` profile — `dsh ... --profile sdk`; no external cordis file.
-  Harness checkout record (2026-08-28): verification uses the AMBIENT checkout at
-  `/home/superguo/Projects/deepseek-harness` at commit `cd5ef814` (merge of
-  PR #3248, tag `dsh-0.1.2-alpha.1`) — no separate clone exists; any checkout at
-  the same tag qualifies as a node carrier. The user's host machine uses its own
-  checkout at the same tag.
+- Verified baseline: dsh-v0.1.2-alpha.1 (2026-08-28). CURRENT PIN (2026-09-03,
+  FINAL CHORE): dsh-v0.1.2-rc.1, commit a66e4702 (the latest tag; the alpha.3
+  plan is superseded). The SDK runtime is the main CLI's built-in `sdk`
+  profile — `dsh ... --profile sdk`; no external cordis file.
+  Harness checkout record: verification uses the AMBIENT checkout at
+  `/home/superguo/Projects/deepseek-harness`, now at tag `dsh-v0.1.2-rc.1`
+  (commit `a66e4702`) — any checkout at the same tag qualifies as a node
+  carrier. The user's host machine uses its own checkout at the same tag.
+  Compatibility verified 2026-09-03: the SDK JSON-RPC methods
+  (initialize / session/prompt / shutdown) are unchanged at rc.1, and the full
+  plugin suite — including the headless e2e that spawns the REAL rc.1 runtime
+  (bridge patch, plan gate, event vocabulary, fs diff meta) — passes.
 - Two runtime configurations, switchable in settings:
   1. Bundled single-file executable: `deepseek-harness-sdk-runtime-<platform>-<arch>`
      built from the harness repo (pkg `--sea`, Node 24 inside, ~174 MB, plus its
@@ -63,8 +68,8 @@
 
 ## DSH checkout discipline (do not disturb)
 - The ambient checkout at `/home/superguo/Projects/deepseek-harness` is a
-  **detached checkout of tag `dsh-0.1.2-alpha.1`** (commit `cd5ef814`), not a
-  branch. Never `git checkout`/`switch`/`pull`/`reset`/`clean` it, and never edit
+  **detached checkout of tag `dsh-v0.1.2-rc.1`** (commit `a66e4702`, updated
+  2026-09-03 by the user), not a branch. Never `git checkout`/`switch`/`pull`/`reset`/`clean` it, and never edit
   or delete its tracked files while a `dsh web` server runs: the running server
   loads worker and code modules from this working tree on disk at every tool
   spawn, so any tree change breaks every session's tooling (`run_code` fails with
@@ -77,7 +82,7 @@
   runs, and restore the checkout only via that function (clean → install →
   build → apply patch → start).
 - If a different DSH version/commit is unavoidable, clone the harness fresh at
-  the same tag — e.g. `git clone --depth 1 --branch dsh-v0.1.2-alpha.1
+  the same tag — e.g. `git clone --depth 1 --branch dsh-v0.1.2-rc.1
   https://github.com/deepseek-ai/deepseek-harness.git
   ~/Projects/dsh-for-jb-plugin-dev` — and do experimental work (branch switches,
   e2e runs) there; the ambient checkout stays pinned.
@@ -86,8 +91,8 @@
   path is the ambient checkout — the runtime it spawns uses the project workspace
   as its working directory, never the checkout.
 - The dev clone lives at `/home/superguo/Projects/dsh-for-jb-plugin-dev` on the
-  dedicated branch `jb-dev-cd5ef814` (created from tag `dsh-0.1.2-alpha.1` @
-  `cd5ef814`); any code changes for bug fixes in the dev clone go on THAT branch
+  dedicated branch `jb-dev-a66e4702` (created from tag `dsh-v0.1.2-rc.1` @
+  `a66e4702`); any code changes for bug fixes in the dev clone go on THAT branch
   only.
 - Deletion incident ROOT-CAUSED and fixed (2026-08-29, strace-confirmed): the
   harness boot heal (`healProfilesModuleFallback` in `packages/boot/app-boot`)

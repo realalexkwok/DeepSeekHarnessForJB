@@ -62,6 +62,25 @@ data class ReasoningRow(
     val text: String,
 ) : TranscriptRow()
 
+/** Item 24 (replanned): an inline permission ask awaiting the user's decision. */
+data class PermissionRow(
+    override val id: String,
+    val approvalId: String,
+    val toolName: String,
+    val reason: String? = null,
+) : TranscriptRow()
+
+/** Item 24 (host round 2026-09-03): an inline generic question card (Kilo's
+ * QuestionView look — replaces the modal QuestionDialog). */
+data class QuestionRow(
+    override val id: String,
+    val questionId: String,
+    val header: String? = null,
+    val question: String = "",
+    val options: List<String> = emptyList(),
+    val multiple: Boolean = false,
+) : TranscriptRow()
+
 enum class NoticeKind {
     TURN_START, TURN_END, STEP, PLAN_MODE, APPROVAL_ASKED, APPROVAL_DECIDED, NOTICE,
     /** Actionable guidance after a no-API-key failure (the panel opens settings once). */

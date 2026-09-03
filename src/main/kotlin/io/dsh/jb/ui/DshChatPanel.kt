@@ -25,8 +25,15 @@ import io.dsh.jb.chat.ComposerAction
 import io.dsh.jb.chat.NoticeKind
 import io.dsh.jb.chat.NoticeRow
 import io.dsh.jb.chat.PromptAssembly
+import io.dsh.jb.chat.PermissionRow
 import io.dsh.jb.chat.PromptContext
+import io.dsh.jb.chat.QuestionRow
 import io.dsh.jb.chat.ReasoningRow
+import io.dsh.jb.bridge.BridgeApproval
+import io.dsh.jb.bridge.PlanAnswer
+import io.dsh.jb.bridge.PlanQuestion
+import io.dsh.jb.permission.PermissionLevel
+import io.dsh.jb.settings.PermissionSettings
 import io.dsh.jb.chat.ToolCardRow
 import io.dsh.jb.chat.ToolCardStatus
 import io.dsh.jb.chat.TranscriptRow
@@ -105,12 +112,14 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 import javax.swing.AbstractAction
 import javax.swing.BorderFactory
 import javax.swing.event.HyperlinkEvent
 import javax.swing.Icon
+import javax.swing.JCheckBox
 import javax.swing.BoxLayout
 import javax.swing.ButtonGroup
 import javax.swing.JButton
@@ -240,6 +249,15 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
     private val customItem = JMenuItem("Custom…")
     private val settingsItem = JMenuItem("Settings…")
     private val effortItems = EffortLevel.entries.associateWith { JRadioButtonMenuItem(it.display) }
+    // Item 24 (replanned): Kilo's shield auto-approve toggle (Lock/Unlock
+    // platform icons stand in for Kilo's custom shield SVGs).
+    private val autoApproveBtn = JButton().apply {
+        isContentAreaFilled = false
+        isBorderPainted = false
+        isFocusPainted = false
+    }
+    private val permissionResponders = ConcurrentHashMap<String, (String) -> Unit>()
+    private val questionResponders = ConcurrentHashMap<String, (PlanAnswer) -> Unit>()
     private val sendIcon = JButton(AllIcons.Actions.Execute).apply {
         toolTipText = "Send prompt"
         isContentAreaFilled = false
@@ -303,6 +321,26 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         class Reasoning(val parts: ReasoningParts) : RowWidget() {
             override fun component() = parts.panel
         }
+        class Permission(val parts: PermissionParts) : RowWidget() {
+            override fun component() = parts.panel
+        }
+        class Question(val parts: QuestionParts) : RowWidget() {
+            override fun component() = parts.panel
+        }
+    }
+
+    /** Item 24 (host round): inline question card parts. */
+    private class QuestionParts(
+        val panel: JComponent,
+        val textArea: JBTextArea,
+    )
+
+    /** Item 24 (replanned): inline permission card parts. */
+    private class PermissionParts(
+        val panel: JComponent,
+        val textArea: JBTextArea,
+    ) {
+        var rowId: String = ""
     }
 
     /** Item 23 (host round 6): the standalone "Reasoning" card under a tool card. */
@@ -432,7 +470,10 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val tabRow = JPanel(BorderLayout(8, 0))
         tabRow.border = JBUI.Borders.empty(4, 12, 6, 12)
         tabRow.add(buildComposerTabs(), BorderLayout.CENTER)
-        tabRow.add(sendIcon, BorderLayout.EAST)
+        val rightWrap = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply { isOpaque = false }
+        rightWrap.add(autoApproveBtn)
+        rightWrap.add(sendIcon)
+        tabRow.add(rightWrap, BorderLayout.EAST)
         composerShell.add(tabRow, BorderLayout.SOUTH)
         composerBlock.add(composerShell, BorderLayout.CENTER)
         bottom.add(composerBlock, BorderLayout.SOUTH)
@@ -452,6 +493,13 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         input.inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.SHIFT_DOWN_MASK), "dsh-newline")
         input.actionMap.put("dsh-newline", DefaultEditorKit.InsertBreakAction())
         sendIcon.addActionListener { submit() }
+        // Icon state is set HERE, not in the field initializer: inside the
+        // initializer's apply block the field is still null (2026-09-03 NPE).
+        syncAutoApproveIcon()
+        autoApproveBtn.addActionListener {
+            PermissionSettings.setAutoApprove(!PermissionSettings.getAutoApprove())
+            syncAutoApproveIcon()
+        }
         // Item 14: @-mention picker wiring (window created lazily once the
         // panel has a window ancestor).
         mentionList.addMouseListener(object : MouseAdapter() {
@@ -544,6 +592,16 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         val service = DshRuntimeService.getInstance(project)
         service.addEventListener(::enqueueEvent)
         service.addStatusListener(::enqueueStatus)
+        // Item 24 (replanned): approvals render as INLINE cards; the card's
+        // buttons resolve the per-ask latch back to the bridge.
+        service.addApprovalListener { approval, respond ->
+            ApplicationManager.getApplication().invokeLater { showPermissionCard(approval, respond) }
+        }
+        // Item 24 (host round): generic ask_user_question cards (plan reviews
+        // stay modal).
+        service.addQuestionListener { question, respond ->
+            ApplicationManager.getApplication().invokeLater { showQuestionCard(question, respond) }
+        }
         flushTimer.start()
         // Roadmap item 11 remainder: editor context actions preload the composer.
         project.getService(ComposerRequests::class.java).addListener { action, text ->
@@ -1557,7 +1615,193 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
         is AssistantRow -> RowWidget.Assistant(assistantParts(row))
         is ToolCardRow -> RowWidget.Tool(toolParts(row))
         is ReasoningRow -> RowWidget.Reasoning(reasoningParts(row))
+        is PermissionRow -> RowWidget.Permission(permissionParts(row))
+        is QuestionRow -> RowWidget.Question(questionParts(row))
         is NoticeRow -> RowWidget.Static(noticePanel(row))
+    }
+
+    /** Item 24 (replanned): Kilo's inline "Permission required" card. */
+    private fun permissionParts(row: PermissionRow): PermissionParts {
+        val panel = rowShell()
+        val header = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+        header.add(JBLabel(AllIcons.General.Warning))
+        header.add(JBLabel("Permission required").apply { font = style.headerFont })
+        val textArea = transcriptText().apply {
+            text = "Tool: " + row.toolName + (row.reason?.let { "\n\n" + it } ?: "")
+        }
+        val actions = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply { isOpaque = false }
+        val rejectBtn = JButton("Reject")
+        val allowBtn = JButton("Allow once")
+        actions.add(rejectBtn)
+        actions.add(allowBtn)
+        val rulesPanel = buildPermissionRulesPanel(row.toolName, allowBtn)
+        val south = JPanel(BorderLayout())
+        south.add(rulesPanel, BorderLayout.NORTH)
+        south.add(actions, BorderLayout.SOUTH)
+        panel.add(header, BorderLayout.NORTH)
+        panel.add(textArea, BorderLayout.CENTER)
+        panel.add(south, BorderLayout.SOUTH)
+        val parts = PermissionParts(panel, textArea)
+        parts.rowId = row.id
+        fun decide(outcome: String) {
+            model.resolvePermission(row.id)
+            permissionResponders.remove(row.id)?.invoke(outcome)
+            render(model.state())
+        }
+        allowBtn.addActionListener { decide("allowed-once") }
+        rejectBtn.addActionListener { decide("rejected") }
+        return parts
+    }
+
+    /** Item 24 (replanned): the card's collapsible Auto-approve Rules section —
+     * existing patterns for the tool (level + remove) and quick always-allow /
+     * always-deny toggles (deciding relabels the primary button to "Allow"). */
+    private fun buildPermissionRulesPanel(tool: String, allowBtn: JButton): JPanel {
+        val wrap = JPanel(BorderLayout()).apply { isOpaque = false }
+        val toggle = JButton("Auto-approve Rules ▸").apply {
+            isContentAreaFilled = false
+            isBorderPainted = false
+            isFocusPainted = false
+            font = style.smallFont
+        }
+        val content = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            isVisible = false
+        }
+        fun refreshContent() {
+            content.removeAll()
+            val rules = PermissionSettings.loadRules()
+            for (p in rules.patterns.filter { it.tool == tool }) {
+                val row = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+                row.add(
+                    JBLabel(p.pattern + " → " + p.level.wire).apply {
+                        font = style.smallFont
+                        foreground = JBColor.GRAY
+                    },
+                )
+                val remove = iconButton(AllIcons.Actions.GC, "Remove rule")
+                remove.addActionListener {
+                    PermissionSettings.saveRules(rules.withoutPattern(tool, p.pattern))
+                    refreshContent()
+                }
+                row.add(remove)
+                content.add(row)
+            }
+            val quick = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+            val allowAll = JButton("Always allow " + tool).apply {
+                isFocusPainted = false
+                font = style.smallFont
+            }
+            val denyAll = JButton("Always deny " + tool).apply {
+                isFocusPainted = false
+                font = style.smallFont
+            }
+            allowAll.addActionListener {
+                PermissionSettings.saveRules(rules.withToolLevel(tool, PermissionLevel.ALLOW))
+                allowBtn.text = "Allow"
+                refreshContent()
+            }
+            denyAll.addActionListener {
+                PermissionSettings.saveRules(rules.withToolLevel(tool, PermissionLevel.DENY))
+                allowBtn.text = "Allow"
+                refreshContent()
+            }
+            quick.add(allowAll)
+            quick.add(denyAll)
+            content.add(quick)
+            content.revalidate()
+            content.repaint()
+        }
+        refreshContent()
+        toggle.addActionListener {
+            content.isVisible = !content.isVisible
+            toggle.text = if (content.isVisible) "Auto-approve Rules ▾" else "Auto-approve Rules ▸"
+            wrap.revalidate()
+        }
+        wrap.add(toggle, BorderLayout.NORTH)
+        wrap.add(content, BorderLayout.CENTER)
+        return wrap
+    }
+
+    /** Item 24 (replanned): renders one forwarded approval as a card row. */
+    private fun showPermissionCard(approval: BridgeApproval, respond: (String) -> Unit) {
+        val rowId = model.addPermission(
+            approval.callId ?: approval.toolName + "-" + System.currentTimeMillis(),
+            approval.toolName,
+            approval.reason,
+        )
+        permissionResponders[rowId] = respond
+        render(model.state())
+    }
+
+    /** Item 24 (host round): Kilo's inline question card — options as
+     * buttons (single-select answers immediately; multi-select + Submit),
+     * plus the optional custom-details field. */
+    private fun questionParts(row: QuestionRow): QuestionParts {
+        val panel = rowShell()
+        val header = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+        header.add(JBLabel(AllIcons.Actions.Help))
+        header.add(JBLabel(row.header ?: "Question").apply { font = style.headerFont })
+        val textArea = transcriptText().apply { text = row.question }
+        val south = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+        }
+        val custom = JBTextField(24)
+        fun submit(selected: List<String>) {
+            val ans = PlanAnswer(row.questionId, selected, custom.text.trim().ifBlank { null })
+            model.resolveQuestion(row.id)
+            questionResponders.remove(row.id)?.invoke(ans)
+            render(model.state())
+        }
+        if (row.multiple) {
+            val boxes = row.options.map { JCheckBox(it) }
+            boxes.forEach { south.add(it) }
+            val submitBtn = JButton("Submit")
+            submitBtn.addActionListener {
+                submit(boxes.filter { it.isSelected }.map { it.text })
+            }
+            val customRow = JPanel(BorderLayout(6, 0)).apply { isOpaque = false }
+            customRow.add(JBLabel("Additional details (optional):").apply {
+                foreground = JBColor.GRAY
+                font = style.smallFont
+            }, BorderLayout.WEST)
+            customRow.add(custom, BorderLayout.CENTER)
+            customRow.add(submitBtn, BorderLayout.EAST)
+            south.add(customRow)
+        } else {
+            for (opt in row.options) {
+                val b = JButton(opt)
+                b.addActionListener { submit(listOf(opt)) }
+                south.add(b)
+            }
+            south.add(JBLabel("Additional details (optional):").apply {
+                foreground = JBColor.GRAY
+                font = style.smallFont
+            })
+            south.add(custom)
+        }
+        panel.add(header, BorderLayout.NORTH)
+        panel.add(textArea, BorderLayout.CENTER)
+        panel.add(south, BorderLayout.SOUTH)
+        return QuestionParts(panel, textArea)
+    }
+
+    /** Item 24 (host round): renders one forwarded question as a card row. */
+    private fun showQuestionCard(question: PlanQuestion, respond: (PlanAnswer) -> Unit) {
+        val rowId = model.addQuestion(question.id, question.header, question.detail ?: question.question, question.options, question.multiple)
+        questionResponders[rowId] = respond
+        render(model.state())
+    }
+
+    private fun syncAutoApproveIcon() {
+        autoApproveBtn.icon = if (PermissionSettings.getAutoApprove()) AllIcons.Actions.Checked else AllIcons.Actions.InlaySecuredShield
+        autoApproveBtn.toolTipText = if (PermissionSettings.getAutoApprove()) {
+            "Auto-approve is enabled — permission prompts are approved automatically"
+        } else {
+            "Auto-approve is disabled — click to approve permission prompts automatically"
+        }
     }
 
     /** Item 23 (host round 6): expandable "Reasoning" card (Kilo ReasoningView
@@ -2350,6 +2594,12 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                 is RowWidget.Reasoning -> {
                     widget.parts.bodyArea.font = newStyle.transcriptFont
                 }
+                is RowWidget.Permission -> {
+                    widget.parts.textArea.font = newStyle.transcriptFont
+                }
+                is RowWidget.Question -> {
+                    widget.parts.textArea.font = newStyle.transcriptFont
+                }
             }
         }
         reflowAll()
@@ -2385,6 +2635,8 @@ class DshChatPanel(private val project: Project) : JPanel(BorderLayout()), Dispo
                     sizeToContent(widget.parts.metaArea, width)
                 }
                 is RowWidget.Reasoning -> sizeToContent(widget.parts.bodyArea, width)
+                is RowWidget.Permission -> sizeToContent(widget.parts.textArea, width)
+                is RowWidget.Question -> sizeToContent(widget.parts.textArea, width)
                 is RowWidget.Static -> Unit
             }
         }

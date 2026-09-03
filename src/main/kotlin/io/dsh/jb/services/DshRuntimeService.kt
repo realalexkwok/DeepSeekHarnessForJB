@@ -15,9 +15,14 @@ import io.dsh.jb.runtime.NodeResolver
 import io.dsh.jb.runtime.RuntimeKey
 import io.dsh.jb.runtime.buildSessionId
 import io.dsh.jb.runtime.newSessionNonce
+import io.dsh.jb.permission.PermissionLevel
 import io.dsh.jb.settings.DshApiKey
 import io.dsh.jb.settings.DshSettingsState
+import io.dsh.jb.settings.PermissionSettings
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Project-scoped owner of the embedded DSH runtime (roadmap item 3), reworked
@@ -134,12 +139,36 @@ class DshRuntimeService(private val project: Project) : Disposable {
      * to "keep planning" for plan reviews and an empty answer otherwise (the
      * runtime answerer falls through, which the harness reports as unavailable).
      */
+    /** Item 24 (host round): generic questions render as INLINE cards (Kilo
+     * QuestionView); plan reviews keep the modal plan dialog. */
+    private val questionListeners =
+        CopyOnWriteArrayList<(io.dsh.jb.bridge.PlanQuestion, (io.dsh.jb.bridge.PlanAnswer) -> Unit) -> Unit>()
+
+    fun addQuestionListener(listener: (io.dsh.jb.bridge.PlanQuestion, (io.dsh.jb.bridge.PlanAnswer) -> Unit) -> Unit) {
+        questionListeners += listener
+    }
+
     private fun answerQuestions(questions: List<io.dsh.jb.bridge.PlanQuestion>): List<io.dsh.jb.bridge.PlanAnswer> =
         questions.map { question ->
             val answer = if (question.intentKind == "plan-review") {
                 io.dsh.jb.ui.PlanReviewDialog.ask(question)
+            } else if (questionListeners.isNotEmpty()) {
+                val latch = CountDownLatch(1)
+                val outcome = AtomicReference<io.dsh.jb.bridge.PlanAnswer?>()
+                for (listener in questionListeners) {
+                    listener(question) { ans ->
+                        outcome.set(ans)
+                        latch.countDown()
+                    }
+                }
+                try {
+                    latch.await(APPROVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+                outcome.get()
             } else {
-                io.dsh.jb.ui.QuestionDialog.ask(question)
+                null
             }
             if (answer != null) {
                 answer
@@ -157,10 +186,39 @@ class DshRuntimeService(private val project: Project) : Disposable {
      */
     private val approvalLock = java.util.concurrent.locks.ReentrantLock(true)
 
+    /** Item 24 (replanned): approval asks forwarded to the panel as inline
+     * cards; the listener receives a respond callback resolving the latch. */
+    private val approvalListeners =
+        CopyOnWriteArrayList<(io.dsh.jb.bridge.BridgeApproval, (String) -> Unit) -> Unit>()
+
+    fun addApprovalListener(listener: (io.dsh.jb.bridge.BridgeApproval, (String) -> Unit) -> Unit) {
+        approvalListeners += listener
+    }
+
     private fun answerApproval(approval: io.dsh.jb.bridge.BridgeApproval): String? {
+        // Item 24 (replanned): the shield auto-approves every ask (Kilo's
+        // machine-reply), and the rule engine short-circuits allow/deny.
+        if (PermissionSettings.getAutoApprove()) return "allowed-once"
+        when (PermissionSettings.loadRules().decide(approval.toolName, approval.reason)) {
+            PermissionLevel.ALLOW -> return "allowed-once"
+            PermissionLevel.DENY -> return "rejected"
+            PermissionLevel.ASK -> Unit
+        }
         approvalLock.lock()
         try {
-            return io.dsh.jb.ui.PermissionDialog.ask(approval) ?: "rejected"
+            val latch = CountDownLatch(1)
+            val outcome = AtomicReference<String?>()
+            for (listener in approvalListeners) {
+                listener(approval) { out ->
+                    outcome.set(out)
+                    latch.countDown()
+                }
+            }
+            latch.await(APPROVAL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            return outcome.get() ?: "cancelled"
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return "cancelled"
         } finally {
             approvalLock.unlock()
         }
@@ -227,6 +285,9 @@ class DshRuntimeService(private val project: Project) : Disposable {
     }
 
     companion object {
+        /** Item 24 (replanned): fails closed to "cancelled" after 10 minutes. */
+        private const val APPROVAL_TIMEOUT_SECONDS = 600L
+
         fun getInstance(project: Project): DshRuntimeService =
             project.getService(DshRuntimeService::class.java)
     }
